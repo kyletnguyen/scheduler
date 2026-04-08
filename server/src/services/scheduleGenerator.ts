@@ -2207,25 +2207,47 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const countAt = (sid: number) => dailyGroup.filter(a => a.station_id === sid).length;
 
           // ── A. Admin supersession: Shayna replaces Jethro on bench ──
-          const adminParkedAtAdmin = dailyGroup.filter(a => {
+          // Case 1: admin-parked at Admin → swap with admin-role on bench
+          // Case 2: admin-parked on bench (not preferred) → swap with admin-role at preferred
+          const allAdminParked = dailyGroup.filter(a => {
             const q = empStationMap.get(a.employee_id);
-            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin'
-              && a.station_id === adminStation.id;
+            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
           });
-          for (const ap of adminParkedAtAdmin) {
+          for (const ap of allAdminParked) {
             const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
-            for (const preferredSid of benchQuals) {
-              // Only place if it won't create 2 MLTs
-              if (mltCountAt(preferredSid) >= 1) continue;
-              const adminOnBench = dailyGroup.find(a =>
+            if (ap.station_id === adminStation.id) {
+              // At Admin → try to replace admin-role on bench
+              for (const preferredSid of benchQuals) {
+                if (mltCountAt(preferredSid) >= 1) continue;
+                const adminOnBench = dailyGroup.find(a =>
+                  a.station_id === preferredSid
+                  && empRoleMap.get(a.employee_id) === 'admin'
+                  && empStationMap.get(a.employee_id)!.includes(adminStation.id)
+                );
+                if (adminOnBench) {
+                  ap.station_id = preferredSid;
+                  adminOnBench.station_id = adminStation.id;
+                  break;
+                }
+              }
+            } else {
+              // On bench but not at preferred → swap with admin-role at preferred
+              const preferredSid = benchQuals[0];
+              if (!preferredSid || preferredSid === ap.station_id) continue;
+              const adminAtPreferred = dailyGroup.find(a =>
                 a.station_id === preferredSid
                 && empRoleMap.get(a.employee_id) === 'admin'
-                && empStationMap.get(a.employee_id)!.includes(adminStation.id)
+                && empStationMap.get(a.employee_id)!.includes(ap.station_id!)
               );
-              if (adminOnBench) {
-                ap.station_id = preferredSid;
-                adminOnBench.station_id = adminStation.id;
-                break;
+              if (adminAtPreferred) {
+                // Check 1-MLT: ap(MLT) goes to preferred, admin goes to ap's current station
+                const prefResult = mltCountAt(preferredSid) + 1; // ap is MLT
+                const curResult = mltCountAt(ap.station_id!) - 1; // ap leaves
+                if (prefResult <= 1 && curResult <= 1) {
+                  const curSid = ap.station_id!;
+                  ap.station_id = preferredSid;
+                  adminAtPreferred.station_id = curSid;
+                }
               }
             }
           }
