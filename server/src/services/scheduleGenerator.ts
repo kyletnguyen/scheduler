@@ -422,19 +422,13 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
           }
           // Check CLS coverage for stations that require it
           if (station.require_cls === 1) {
-            const hasCLS = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
+            const hasCLS = stationAssignees.some(a => {
+              const role = empRoleMap.get(a.employee_id);
+              return role === 'cls' || role === 'admin';
+            });
             if (!hasCLS) {
-              const dow = getDow(group[0].date);
-              const isWeekend = dow === 0 || dow === 6;
-              const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
-              let suppress = false;
-              if (isWeekend && isHemaOrChem) {
-                suppress = true;
-              }
-              if (!suppress) {
-                const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-                warnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
-              }
+              const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
+              warnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
             }
           }
         }
@@ -2502,6 +2496,124 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
+      // ── E. Per-diem optimization: only keep per-diem at stations that need them ──
+      // Per-diem employees should fill gaps, not pad already-covered stations.
+      // Priority: 1) stations below min_staff, 2) CLS/MLT role gaps, 3) stations
+      // below max that could use help. Otherwise send to Admin.
+      if (adminStation) {
+        for (const dailyGroup of dailyGroups) {
+          const perDiemAssignments = dailyGroup.filter(a => {
+            const emp = employees.find(e => e.id === a.employee_id);
+            return emp && emp.employment_type === 'per-diem';
+          });
+
+          for (const pda of perDiemAssignments) {
+            const currentSid = pda.station_id;
+            if (!currentSid || currentSid === adminStation.id) continue;
+
+            // Only float MLT per-diems — CLS per-diems stay at their station
+            const pdaRole = empRoleMap.get(pda.employee_id);
+            if (pdaRole === 'cls') continue;
+
+            const station = realStations.find(s => s.id === currentSid);
+            if (!station) continue;
+
+            const stationStaff = dailyGroup.filter(a => a.station_id === currentSid);
+            const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
+              : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
+              : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
+              : station.min_staff ?? 1;
+
+            // If station is at or below min, per-diem is needed here — keep them
+            if (stationStaff.length <= minNeeded) continue;
+
+            // If per-diem is the only CLS or only MLT at a require_cls station, keep them
+            const role = empRoleMap.get(pda.employee_id);
+            if (station.require_cls === 1) {
+              if (role === 'cls') {
+                const otherCLS = stationStaff.filter(a => a.employee_id !== pda.employee_id && empRoleMap.get(a.employee_id) === 'cls');
+                if (otherCLS.length === 0) continue; // only CLS here, keep
+              }
+              if (role === 'mlt') {
+                const otherMLT = stationStaff.filter(a => a.employee_id !== pda.employee_id && empRoleMap.get(a.employee_id) === 'mlt');
+                if (otherMLT.length === 0) continue; // only MLT here, keep
+              }
+            }
+
+            // Per-diem is extra at this station — try to move them somewhere more useful
+            const quals = empStationMap.get(pda.employee_id)!;
+            let moved = false;
+
+            // Priority 1: move to an understaffed station
+            for (const target of realStations) {
+              if (target.id === currentSid || target.id === adminStation.id) continue;
+              if (!quals.includes(target.id)) continue;
+              const targetStaff = dailyGroup.filter(a => a.station_id === target.id);
+              const targetMin = groupShiftName === 'am' ? (target as any).min_staff_am ?? target.min_staff ?? 1
+                : groupShiftName === 'pm' ? (target as any).min_staff_pm ?? target.min_staff ?? 1
+                : groupShiftName === 'night' ? (target as any).min_staff_night ?? target.min_staff ?? 1
+                : target.min_staff ?? 1;
+              if (targetStaff.length < targetMin) {
+                // Check 1-MLT constraint
+                if (role === 'mlt') {
+                  const targetMLTs = targetStaff.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
+                  if (targetMLTs >= 1) continue;
+                }
+                pda.station_id = target.id;
+                moved = true;
+                break;
+              }
+            }
+
+            // Priority 2: move to a station missing CLS/MLT role
+            if (!moved) {
+              for (const target of realStations) {
+                if (target.id === currentSid || target.id === adminStation.id) continue;
+                if (target.require_cls !== 1) continue;
+                if (!quals.includes(target.id)) continue;
+                const targetStaff = dailyGroup.filter(a => a.station_id === target.id);
+                const targetMax = (target as any).max_staff ?? 99;
+                if (targetStaff.length >= targetMax) continue;
+                if (role === 'cls' && !targetStaff.some(a => empRoleMap.get(a.employee_id) === 'cls')) {
+                  pda.station_id = target.id;
+                  moved = true;
+                  break;
+                }
+                if (role === 'mlt' && !targetStaff.some(a => empRoleMap.get(a.employee_id) === 'mlt')) {
+                  const targetMLTs = targetStaff.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
+                  if (targetMLTs >= 1) continue;
+                  pda.station_id = target.id;
+                  moved = true;
+                  break;
+                }
+              }
+            }
+
+            // If nowhere useful, send to Admin
+            if (!moved) {
+              pda.station_id = adminStation.id;
+            }
+          }
+        }
+      }
+
+      // ── Final 1-MLT enforcement (catch any violations from per-diem placement) ──
+      if (adminStation) {
+        for (const dailyGroup of dailyGroups) {
+          for (const station of realStations) {
+            if (station.id === adminStation.id) continue;
+            const assignees = dailyGroup.filter(a => a.station_id === station.id);
+            const mlts = assignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt');
+            if (mlts.length < 2) continue;
+            // Move per-diem MLT to Admin
+            const pdMLT = mlts.find(a => employees.find(e => e.id === a.employee_id)?.employment_type === 'per-diem');
+            if (pdMLT) {
+              pdMLT.station_id = adminStation.id;
+            }
+          }
+        }
+      }
+
       // Per-day warnings (staffing may vary day-to-day due to PTO/off days)
       for (const dailyGroup of dailyGroups) {
         const date = dailyGroup[0].date;
@@ -2557,17 +2669,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             // Check CLS coverage
             if (station.require_cls === 1) {
-              const hasCLS = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
+              const hasCLS = stationAssignees.some(a => {
+                const role = empRoleMap.get(a.employee_id);
+                return role === 'cls' || role === 'admin';
+              });
               if (!hasCLS) {
-                const dow = getDow(date);
-                const isWeekend = dow === 0 || dow === 6;
-                const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
-                let suppress = false;
-                if (isWeekend && isHemaOrChem) suppress = true;
-                if (!suppress) {
-                  const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
-                  passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftName})`);
-                }
+                const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
+                passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftName})`);
               }
             }
           }
