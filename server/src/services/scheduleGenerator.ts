@@ -2155,6 +2155,46 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
+      // CLS rebalance: stations with require_cls=1 need at least one CLS.
+      // If a station has only MLTs (no CLS), swap an MLT out with a CLS from
+      // another station that has multiple CLS employees.
+      for (const dailyGroup of dailyGroups) {
+        for (const station of realStations) {
+          if (station.require_cls !== 1) continue;
+          const assignees = dailyGroup.filter(a => a.station_id === station.id);
+          if (assignees.length === 0) continue;
+          const hasCLS = assignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
+          if (hasCLS) continue;
+
+          // No CLS here — find a CLS at another station to swap with an MLT here
+          const mltHere = assignees.find(a => empRoleMap.get(a.employee_id) === 'mlt');
+          if (!mltHere) continue; // all admins, can't fix
+
+          for (const otherStation of realStations) {
+            if (otherStation.id === station.id) continue;
+            const otherAssignees = dailyGroup.filter(a => a.station_id === otherStation.id);
+            const otherCLS = otherAssignees.filter(a => empRoleMap.get(a.employee_id) === 'cls');
+            // Only take a CLS if the other station has 2+ CLS (or doesn't require CLS)
+            const otherNeedsCLS = otherStation.require_cls === 1;
+            if (otherNeedsCLS && otherCLS.length <= 1) continue;
+
+            // Find a CLS there who can work here, and our MLT can work there
+            for (const cls of otherCLS) {
+              if (!empStationMap.get(cls.employee_id)!.includes(station.id)) continue;
+              if (!empStationMap.get(mltHere.employee_id)!.includes(otherStation.id)) continue;
+              // Swap
+              cls.station_id = station.id;
+              mltHere.station_id = otherStation.id;
+              break;
+            }
+            // Check if we fixed it
+            const nowHasCLS = dailyGroup.filter(a => a.station_id === station.id)
+              .some(a => empRoleMap.get(a.employee_id) === 'cls');
+            if (nowHasCLS) break;
+          }
+        }
+      }
+
       // Final sweep: admin-parked employees (like Shayna) should be at their
       // preferred bench station whenever possible. If they ended up at a non-preferred
       // station through any code path (Step 2, 3, 4, etc.), swap them with someone
