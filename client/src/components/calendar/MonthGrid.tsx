@@ -1,0 +1,1222 @@
+import React, { useState } from 'react';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
+import { useSchedule, useShifts, useWarnings, useDeleteAssignment, useGenerateSchedule } from '../../hooks/useSchedule';
+import { useEmployees } from '../../hooks/useEmployees';
+import { useTimeOff } from '../../hooks/useTimeOff';
+import AssignmentModal from './AssignmentModal';
+import type { Shift, ScheduleAssignment, Employee } from '../../types';
+import toast from 'react-hot-toast';
+
+
+const SHIFT_ICONS: Record<string, { label: string; bg: string; text: string; rgb: [number, number, number] }> = {
+  AM:        { label: 'AM', bg: 'bg-yellow-400',   text: 'text-yellow-900', rgb: [250, 204, 21] },
+  PM:        { label: 'PM', bg: 'bg-indigo-600',  text: 'text-white', rgb: [79, 70, 229] },
+  Night:     { label: 'NS', bg: 'bg-gray-700',    text: 'text-white', rgb: [55, 65, 81] },
+};
+
+// Station abbreviations and colors (Tailwind class + RGB for PDF)
+const STATION_STYLES: Record<string, { abbr: string; color: string; bg: string; rgb: [number, number, number] }> = {
+  'Hematology/UA': { abbr: 'HM', color: 'text-violet-600',   bg: 'bg-violet-500',  rgb: [139, 92, 246] },
+  'Chemistry':     { abbr: 'CH', color: 'text-amber-600',   bg: 'bg-amber-500',   rgb: [217, 119, 6] },
+  'Microbiology':  { abbr: 'MC', color: 'text-emerald-600', bg: 'bg-emerald-500', rgb: [5, 150, 105] },
+  'Blood Bank':    { abbr: 'BB', color: 'text-red-600',     bg: 'bg-red-500',     rgb: [220, 38, 38] },
+  'Admin':         { abbr: 'AD', color: 'text-sky-600',     bg: 'bg-sky-500',     rgb: [14, 165, 233] },
+};
+
+function getStationDisplay(name: string): { abbr: string; color: string; bg: string; rgb: [number, number, number] } {
+  if (STATION_STYLES[name]) return STATION_STYLES[name];
+  return { abbr: name.substring(0, 2).toUpperCase(), color: 'text-gray-500', bg: 'bg-gray-400', rgb: [107, 114, 128] };
+}
+
+export default function MonthGrid() {
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const month = format(currentDate, 'yyyy-MM');
+
+  const { data: assignments = [] } = useSchedule(month);
+  const { data: shifts = [] } = useShifts();
+  const { data: rawEmployees = [] } = useEmployees();
+  const { data: timeOff = [] } = useTimeOff({ month });
+  const { data: liveWarnings = [] } = useWarnings(month);
+  const deleteAssignment = useDeleteAssignment(month);
+  const generateSchedule = useGenerateSchedule(month);
+
+  // Sort employees: group by shift (AM → PM → Night → Floater), then alphabetize within group
+  const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
+  const employees = [...rawEmployees].sort((a, b) => {
+    const shiftDiff = (SHIFT_ORDER[a.default_shift] ?? 9) - (SHIFT_ORDER[b.default_shift] ?? 9);
+    if (shiftDiff !== 0) return shiftDiff;
+    return a.name.localeCompare(b.name);
+  });
+
+  const [modal, setModal] = useState<{ date: string; shift: Shift; employee?: Employee } | null>(null);
+  const [showWarnings, setShowWarnings] = useState(true);
+  const [coverageModal, setCoverageModal] = useState<{ date: string; shift: string } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    confirmColor?: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const warnings = liveWarnings;
+
+  const start = startOfMonth(currentDate);
+  const end = endOfMonth(currentDate);
+  const days = eachDayOfInterval({ start, end });
+
+  // Index: employee_id -> date -> assignment
+  const assignmentIndex = new Map<string, ScheduleAssignment>();
+  for (const a of assignments) {
+    assignmentIndex.set(`${a.employee_id}-${a.date}`, a);
+  }
+
+  // Index: employee_id -> Set of time-off dates
+  const timeOffIndex = new Map<number, Set<string>>();
+  for (const t of timeOff) {
+    if (!timeOffIndex.has(t.employee_id)) timeOffIndex.set(t.employee_id, new Set());
+    timeOffIndex.get(t.employee_id)!.add(t.date);
+  }
+
+  // Index: date -> list of coverage issues (parsed from warnings)
+  const stationNames = Object.keys(STATION_STYLES);
+  const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn'; message: string }[]>();
+  for (const w of warnings) {
+    const dateMatch = w.match(/(\d{4}-\d{2}-\d{2})/);
+    if (!dateMatch) continue;
+    const date = dateMatch[1];
+
+    // Determine shift from warning text
+    const shiftMatch = w.match(/\((\w+)\)\s*$/) || w.match(/\b(AM|PM|Night)\b\s+shift/i);
+    const shift = shiftMatch ? shiftMatch[1] : '';
+
+    // Determine station
+    let station = '';
+    for (const sn of stationNames) {
+      if (w.includes(sn)) { station = sn; break; }
+    }
+
+    const severity: 'critical' | 'warn' = (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical' : 'warn';
+
+    // Simplified message
+    let msg = w
+      .replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL): /, '')
+      .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!coverageByDate.has(date)) coverageByDate.set(date, []);
+    coverageByDate.get(date)!.push({ shift, station, severity, message: msg });
+  }
+
+  // Cross-shift index: employees assigned to a shift different from their default
+  // Maps target shift group (lowercase) -> list of { employee, cross-shift assignments for that group }
+  const crossShiftByGroup = new Map<string, { emp: Employee; assignments: ScheduleAssignment[] }[]>();
+  for (const emp of employees) {
+    if (emp.default_shift === 'floater') continue;
+    const crossAssignments = assignments.filter(a => {
+      if (a.employee_id !== emp.id) return false;
+      const assignedShift = a.shift_name.toLowerCase();
+      return assignedShift !== emp.default_shift;
+    });
+    if (crossAssignments.length === 0) continue;
+    // Group by target shift
+    const byShift = new Map<string, ScheduleAssignment[]>();
+    for (const a of crossAssignments) {
+      const s = a.shift_name.toLowerCase();
+      if (!byShift.has(s)) byShift.set(s, []);
+      byShift.get(s)!.push(a);
+    }
+    for (const [shiftGroup, shiftAssignments] of byShift) {
+      if (!crossShiftByGroup.has(shiftGroup)) crossShiftByGroup.set(shiftGroup, []);
+      crossShiftByGroup.get(shiftGroup)!.push({ emp, assignments: shiftAssignments });
+    }
+  }
+
+  const handleCellClick = (emp: Employee, dateStr: string) => {
+    const key = `${emp.id}-${dateStr}`;
+    const existing = assignmentIndex.get(key);
+
+    if (existing) {
+      setConfirmDialog({
+        title: 'Remove Assignment',
+        message: `Remove ${emp.name} from ${existing.shift_name} on ${dateStr}?`,
+        confirmLabel: 'Remove',
+        confirmColor: 'bg-red-600 hover:bg-red-700',
+        onConfirm: () => { deleteAssignment.mutate(existing.id); setConfirmDialog(null); },
+      });
+      return;
+    }
+
+    // Find the shift to assign based on employee's default
+    const shiftName = emp.default_shift === 'floater' ? null : emp.default_shift;
+    const shift = shiftName
+      ? shifts.find((s) => s.name.toLowerCase() === shiftName)
+      : null;
+
+    if (shift) {
+      setModal({ date: dateStr, shift, employee: emp });
+    } else {
+      // Floater — show modal to pick shift
+      setModal({ date: dateStr, shift: shifts[0], employee: emp });
+    }
+  };
+
+  const handleExportPDF = () => {
+    try {
+      const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+      const pageWidth = pdf.internal.pageSize.width;
+      const pageHeight = pdf.internal.pageSize.height;
+
+      // Group employees by shift
+      const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
+      const shiftGroups: { key: string; label: string; emps: typeof employees }[] = [];
+      const groupMap = new Map<string, typeof employees>();
+      for (const emp of employees) {
+        const key = emp.default_shift;
+        if (!groupMap.has(key)) groupMap.set(key, []);
+        groupMap.get(key)!.push(emp);
+      }
+      for (const [key, emps] of [...groupMap.entries()].sort((a, b) => (SHIFT_ORDER[a[0]] ?? 9) - (SHIFT_ORDER[b[0]] ?? 9))) {
+        const label = key === 'am' ? 'AM' : key === 'pm' ? 'PM' : key.charAt(0).toUpperCase() + key.slice(1);
+        shiftGroups.push({ key, label, emps });
+      }
+
+      // Legend renderer (used on each page)
+      const drawLegend = () => {
+        pdf.setFontSize(8);
+        const ly = 46;
+        let lx = 40;
+
+        // Stations + Admin
+        pdf.setTextColor(100, 100, 100);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text('Stations:', lx, ly);
+        lx += pdf.getTextWidth('Stations:') + 6;
+
+        const legendItems: { abbr: string; rgb: [number, number, number]; label: string }[] = [
+          ...Object.entries(STATION_STYLES).map(([name, info]) => ({ abbr: info.abbr, rgb: info.rgb, label: name })),
+        ];
+        for (const item of legendItems) {
+          const [r, g, b] = item.rgb;
+          pdf.setFillColor(r, g, b);
+          pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+          pdf.setTextColor(255, 255, 255);
+          pdf.setFont('helvetica', 'bold');
+          pdf.text(item.abbr, lx + 9, ly - 1, { align: 'center' });
+          pdf.setTextColor(80, 80, 80);
+          pdf.setFont('helvetica', 'normal');
+          pdf.text(item.label, lx + 22, ly);
+          lx += pdf.getTextWidth(item.label) + 32;
+        }
+
+        // PTO + Off on the same row
+        pdf.setFillColor(254, 226, 226);
+        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.setTextColor(220, 38, 38);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text('P', lx + 9, ly - 1, { align: 'center' });
+        pdf.setTextColor(80, 80, 80);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text('PTO', lx + 22, ly);
+        lx += pdf.getTextWidth('PTO') + 32;
+
+        pdf.setFillColor(240, 240, 240);
+        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.setTextColor(180, 180, 180);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text('—', lx + 9, ly - 1, { align: 'center' });
+        pdf.setTextColor(80, 80, 80);
+        pdf.text('Off', lx + 22, ly);
+      };
+
+      // Footer renderer
+      const drawFooter = (pageNum: number, totalPages: number) => {
+        pdf.setFontSize(8);
+        pdf.setTextColor(150, 150, 150);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text(
+          `Generated ${format(new Date(), 'MM/dd/yyyy h:mm a')}`,
+          pageWidth - 30, pageHeight - 14, { align: 'right' }
+        );
+        pdf.text(`Page ${pageNum} of ${totalPages}`, 30, pageHeight - 14);
+      };
+
+      // Use single-letter day abbreviations so columns don't clip
+      const DAY_LETTERS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+      const head = ['Employee', ...days.map(d => DAY_LETTERS[getDay(d)] + '\n' + format(d, 'd'))];
+      const totalPages = shiftGroups.length;
+
+      // Generate one page per shift group
+      shiftGroups.forEach((group, pageIndex) => {
+        if (pageIndex > 0) pdf.addPage();
+
+        // Title
+        pdf.setFontSize(18);
+        pdf.setTextColor(30, 30, 30);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`${format(currentDate, 'MMMM yyyy')} — ${group.label} Shift`, 30, 28);
+
+        drawLegend();
+
+        // Build table data for this shift group
+        const cellData: Map<string, { shiftName: string; stationName: string | null }> = new Map();
+        const body: string[][] = [];
+
+        group.emps.forEach((emp, ri) => {
+          const cells = [emp.name];
+          for (let ci = 0; ci < days.length; ci++) {
+            const dateStr = format(days[ci], 'yyyy-MM-dd');
+            const assignment = assignmentIndex.get(`${emp.id}-${dateStr}`);
+            const isOff = timeOffIndex.get(emp.id)?.has(dateStr);
+
+            if (isOff) {
+              cells.push('PTO');
+            } else if (assignment) {
+              const icon = SHIFT_ICONS[assignment.shift_name];
+              const stationDisplay = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
+              cells.push(stationDisplay ? stationDisplay.abbr : (icon ? icon.label : assignment.shift_name.charAt(0)));
+              cellData.set(`${ri}-${ci}`, {
+                shiftName: assignment.shift_name,
+                stationName: assignment.station_name ?? null,
+              });
+            } else {
+              cells.push('—');
+            }
+          }
+          body.push(cells);
+        });
+
+        // Calculate sizing to fill page width evenly
+        const margin = 16;
+        const usableWidth = pageWidth - margin * 2;
+        const empColWidth = 85;
+        const dayColWidth = (usableWidth - empColWidth) / days.length;
+
+        // Scale font based on available column width and employee count
+        const fontSize = group.emps.length <= 5 ? 9 : group.emps.length <= 10 ? 8 : 7;
+        const cellHeight = group.emps.length <= 5 ? 28 : group.emps.length <= 10 ? 22 : 18;
+
+        // Build column styles — explicitly set width for every column
+        const colStyles: Record<number, { halign?: string; cellWidth?: number; fontSize?: number; fontStyle?: string; overflow?: string }> = {
+          0: { halign: 'left', cellWidth: empColWidth, fontSize: fontSize + 1, fontStyle: 'bold', overflow: 'ellipsize' },
+        };
+        for (let i = 0; i < days.length; i++) {
+          colStyles[i + 1] = { cellWidth: dayColWidth, overflow: 'visible' };
+        }
+
+        autoTable(pdf, {
+          startY: 56,
+          margin: { left: margin, right: margin },
+          head: [head],
+          body,
+          theme: 'grid',
+          tableWidth: usableWidth,
+          styles: {
+            fontSize,
+            cellPadding: 1,
+            halign: 'center',
+            valign: 'middle',
+            lineWidth: 0.4,
+            lineColor: [190, 190, 190],
+            minCellHeight: cellHeight,
+            overflow: 'visible',
+          },
+          headStyles: {
+            fillColor: [235, 240, 248],
+            textColor: [40, 40, 40],
+            fontStyle: 'bold',
+            fontSize: fontSize,
+            minCellHeight: 26,
+            cellPadding: { top: 2, bottom: 2, left: 1, right: 1 },
+            lineWidth: 0.5,
+            lineColor: [160, 160, 160],
+          },
+          columnStyles: colStyles as any,
+          didParseCell: (data) => {
+            // Weekend header columns
+            if (data.section === 'head' && data.column.index > 0) {
+              const day = days[data.column.index - 1];
+              if (day && (getDay(day) === 0 || getDay(day) === 6)) {
+                data.cell.styles.fillColor = [255, 237, 213];
+                data.cell.styles.textColor = [180, 50, 0];
+                data.cell.styles.fontStyle = 'bold';
+              }
+            }
+            if (data.section !== 'body') return;
+
+            const isOddRow = data.row.index % 2 === 1;
+            const dayIdx = data.column.index - 1;
+
+            // Alternate row colors for readability
+            if (data.column.index === 0) {
+              data.cell.styles.fillColor = isOddRow ? [245, 247, 250] : [255, 255, 255];
+              return;
+            }
+
+            const day = days[dayIdx];
+            if (!day) return;
+            const isWknd = getDay(day) === 0 || getDay(day) === 6;
+            const text = data.cell.text.join('');
+
+            // Alternate row tint + weekend tint
+            if (isWknd) {
+              data.cell.styles.fillColor = isOddRow ? [250, 242, 234] : [253, 248, 243];
+            } else {
+              data.cell.styles.fillColor = isOddRow ? [245, 247, 250] : [255, 255, 255];
+            }
+
+            // Off days just show faded dash — no badge needed
+            if (text === '—') {
+              data.cell.styles.textColor = [200, 200, 200];
+            } else {
+              // Hide default text — we'll draw badge + text manually in didDrawCell
+              data.cell.styles.textColor = [255, 255, 255, 0] as any;
+            }
+          },
+          didDrawCell: (data) => {
+            if (data.section !== 'body') return;
+            if (data.column.index === 0) return;
+
+            const text = data.cell.text.join('');
+            if (text === '—') return; // dashes rendered normally
+
+            const dayIdx = data.column.index - 1;
+            const ri = data.row.index;
+            const cellX = data.cell.x;
+            const cellY = data.cell.y;
+            const cellW = data.cell.width;
+            const cellH = data.cell.height;
+
+            // Badge dimensions — centered in cell like the web view
+            const badgeW = Math.min(cellW - 4, 20);
+            const badgeH = Math.min(cellH - 6, 14);
+            const badgeX = cellX + (cellW - badgeW) / 2;
+            const badgeY = cellY + (cellH - badgeH) / 2;
+
+            let bgColor: [number, number, number] | null = null;
+            let textColor: [number, number, number] = [255, 255, 255];
+            let label = text;
+
+            if (text === 'PTO') {
+              bgColor = [254, 202, 202];
+              textColor = [185, 28, 28];
+            } else {
+              const cd = cellData.get(`${ri}-${dayIdx}`);
+              if (cd) {
+                if (cd.stationName) {
+                  bgColor = [...getStationDisplay(cd.stationName).rgb] as [number, number, number];
+                } else {
+                  const icon = SHIFT_ICONS[cd.shiftName];
+                  if (icon) bgColor = [...icon.rgb] as [number, number, number];
+                }
+              }
+            }
+
+            if (!bgColor) return;
+
+            // Draw rounded badge
+            const [r, g, b] = bgColor;
+            pdf.setFillColor(r, g, b);
+            pdf.roundedRect(badgeX, badgeY, badgeW, badgeH, 2, 2, 'F');
+
+            // Draw label text centered on badge
+            pdf.setTextColor(textColor[0], textColor[1], textColor[2]);
+            pdf.setFont('helvetica', 'bold');
+            pdf.setFontSize(fontSize - 1);
+            pdf.text(label, badgeX + badgeW / 2, badgeY + badgeH / 2 + (fontSize - 1) * 0.35, { align: 'center' });
+          },
+        });
+
+        drawFooter(pageIndex + 1, totalPages);
+      });
+
+      pdf.save(`schedule-${month}.pdf`);
+      toast.success('PDF exported');
+    } catch (err) {
+      console.error('PDF export error:', err);
+      toast.error('Failed to export PDF');
+    }
+  };
+
+
+  const todayStr = format(new Date(), 'yyyy-MM-dd');
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-bold text-gray-900">Schedule</h2>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleExportPDF}
+            className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700"
+          >
+            Export PDF
+          </button>
+          <button
+            onClick={() => {
+              setConfirmDialog({
+                title: 'Auto-Generate Schedule',
+                message: `Generate schedule for ${format(currentDate, 'MMMM yyyy')}? This will remove all existing assignments for this month, including any manual or forced assignments.`,
+                confirmLabel: 'Generate',
+                confirmColor: 'bg-green-600 hover:bg-green-700',
+                onConfirm: () => {
+                  setConfirmDialog(null);
+                  generateSchedule.mutate({ clear: true }, {
+                    onSuccess: (data) => {
+                      toast.success(`Generated ${data.inserted} assignments`);
+                      setShowWarnings(true);
+                    },
+                    onError: (err) => toast.error(err.message),
+                  });
+                },
+              });
+            }}
+            disabled={generateSchedule.isPending}
+            className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50"
+          >
+            {generateSchedule.isPending ? 'Generating...' : 'Auto-Generate'}
+          </button>
+          <button
+            onClick={() => setCurrentDate(subMonths(currentDate, 1))}
+            className="px-3 py-1.5 bg-white border rounded text-sm hover:bg-gray-50"
+          >
+            &larr; Prev
+          </button>
+          <span className="text-lg font-semibold min-w-[180px] text-center">
+            {format(currentDate, 'MMMM yyyy')}
+          </span>
+          <button
+            onClick={() => setCurrentDate(addMonths(currentDate, 1))}
+            className="px-3 py-1.5 bg-white border rounded text-sm hover:bg-gray-50"
+          >
+            Next &rarr;
+          </button>
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="flex gap-4 mb-3 text-xs items-center">
+        {Object.entries(SHIFT_ICONS).map(([name, { label, bg, text }]) => (
+          <div key={name} className="flex items-center gap-1.5">
+            <span className={`w-6 h-5 rounded text-[10px] font-bold flex items-center justify-center ${bg} ${text}`}>{label}</span>
+            <span className="text-gray-600">{name}</span>
+          </div>
+        ))}
+        <div className="flex items-center gap-1.5">
+          <span className="w-6 h-5 rounded text-[10px] font-bold flex items-center justify-center bg-red-100 text-red-600">P</span>
+          <span className="text-gray-600">PTO</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-6 h-5 rounded text-[10px] flex items-center justify-center bg-gray-100 text-gray-400">&mdash;</span>
+          <span className="text-gray-600">Off</span>
+        </div>
+        <div className="border-l pl-4 flex items-center gap-2">
+          <span className="text-gray-500">Stations:</span>
+          {Object.entries(STATION_STYLES).map(([name, { abbr, bg }]) => (
+            <div key={name} className="flex items-center gap-1">
+              <span className={`w-5 h-4 rounded text-[9px] font-bold flex items-center justify-center ${bg} text-white`}>{abbr}</span>
+              <span className="text-gray-600 text-[10px]">{name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Schedule Issues — per station, split by shift */}
+      {warnings.length > 0 && showWarnings && (() => {
+        const SHIFT_LABELS: Record<string, { label: string; color: string; bgLight: string }> = {
+          AM:    { label: 'AM (Day)',       color: 'text-amber-700',  bgLight: 'bg-amber-50' },
+          PM:    { label: 'PM (Evening)',   color: 'text-indigo-700', bgLight: 'bg-indigo-50' },
+          Night: { label: 'Night (Graveyard)', color: 'text-gray-700',   bgLight: 'bg-gray-100' },
+          '':    { label: 'General',        color: 'text-gray-600',   bgLight: 'bg-gray-50' },
+        };
+
+        // Parse into: station -> shift -> issues[]
+        const sNames = Object.keys(STATION_STYLES);
+        const byStationShift = new Map<string, Map<string, { severity: 'critical' | 'warn'; date: string; msg: string }[]>>();
+        let totalIssues = 0;
+
+        for (const w of warnings) {
+          let matchedStation = '';
+          for (const sn of sNames) {
+            if (w.includes(sn)) { matchedStation = sn; break; }
+          }
+          if (!matchedStation) continue; // skip general/hours warnings
+
+          // Extract shift
+          const shiftMatch = w.match(/\((\w+)\)\s*$/) || w.match(/\b(AM|PM|Night)\b\s+shift/i);
+          const shift = shiftMatch ? shiftMatch[1] : '';
+
+          const clean = w.replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL): /, '');
+          const dateMatch = clean.match(/(\d{4}-\d{2}-\d{2})/);
+          const dateStr = dateMatch ? format(new Date(dateMatch[1] + 'T00:00:00'), 'EEE M/d') : '';
+          let msg = clean
+            .replace(matchedStation, '')
+            .replace(/\s*\(\w+\)\s*$/, '')
+            .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/^[—\-–\s]+/, '');
+
+          const severity: 'critical' | 'warn' = (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical' : 'warn';
+
+          if (!byStationShift.has(matchedStation)) byStationShift.set(matchedStation, new Map());
+          const shiftMap = byStationShift.get(matchedStation)!;
+          if (!shiftMap.has(shift)) shiftMap.set(shift, []);
+          shiftMap.get(shift)!.push({ severity, date: dateStr, msg });
+          totalIssues++;
+        }
+
+        // Also gather shift-level "no one assigned at all" warnings
+        const shiftOnlyIssues = new Map<string, string[]>();
+        for (const w of warnings) {
+          const noCovrMatch = w.match(/No coverage for (\w+) shift on (\d{4}-\d{2}-\d{2})/);
+          if (noCovrMatch) {
+            const shift = noCovrMatch[1];
+            const dateStr = format(new Date(noCovrMatch[2] + 'T00:00:00'), 'EEE M/d');
+            if (!shiftOnlyIssues.has(shift)) shiftOnlyIssues.set(shift, []);
+            shiftOnlyIssues.get(shift)!.push(dateStr);
+            totalIssues++;
+          }
+        }
+
+        if (byStationShift.size === 0 && shiftOnlyIssues.size === 0) return null;
+
+        return (
+          <div className="mb-4 bg-white border border-red-200 rounded-lg shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 bg-red-50 border-b border-red-200">
+              <h3 className="text-sm font-bold text-red-800 flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">!</span>
+                Coverage Issues
+                <span className="text-xs font-normal text-red-500">({totalIssues} total)</span>
+              </h3>
+              <button onClick={() => setShowWarnings(false)} className="text-red-400 hover:text-red-600 text-xs font-medium">Dismiss</button>
+            </div>
+
+            {/* Empty shifts — no one assigned at all */}
+            {shiftOnlyIssues.size > 0 && (
+              <div className="px-4 py-3 border-b border-red-100">
+                {[...shiftOnlyIssues.entries()].sort(([a], [b]) => {
+                  const order = ['AM', 'PM', 'Night'];
+                  return order.indexOf(a) - order.indexOf(b);
+                }).map(([shift, dates]) => {
+                  const sl = SHIFT_LABELS[shift] ?? SHIFT_LABELS[''];
+                  return (
+                    <div key={shift} className="mb-2 last:mb-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs font-bold ${sl.color}`}>{sl.label}</span>
+                        <span className="text-[11px] text-red-600 font-medium">
+                          No staff assigned on {dates.length} day{dates.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {dates.map(d => (
+                          <span key={d} className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded font-medium">{d}</span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Station cards */}
+            <div className="p-3 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-3">
+              {[...byStationShift.entries()].map(([stationName, shiftMap]) => {
+                const stationInfo = STATION_STYLES[stationName];
+                const stationTotal = [...shiftMap.values()].reduce((sum, arr) => sum + arr.length, 0);
+                const hasCritical = [...shiftMap.values()].some(arr => arr.some(i => i.severity === 'critical'));
+                return (
+                  <div key={stationName} className="bg-white border rounded-lg overflow-hidden shadow-sm">
+                    {/* Station header bar */}
+                    <div className={`${stationInfo?.bg ?? 'bg-gray-500'} px-3 py-2 flex items-center justify-between`}>
+                      <span className="text-white text-xs font-bold flex items-center gap-1.5">
+                        {stationInfo?.abbr ?? '??'} {stationName}
+                        {hasCritical && <span className="w-4 h-4 rounded-full bg-white/30 text-white text-[9px] font-bold flex items-center justify-center">!</span>}
+                      </span>
+                      <span className="text-white/80 text-[10px]">{stationTotal} issue{stationTotal !== 1 ? 's' : ''}</span>
+                    </div>
+                    {/* Issues grouped by shift */}
+                    <div className="max-h-[200px] overflow-y-auto divide-y divide-gray-100">
+                      {[...shiftMap.entries()].sort(([a], [b]) => {
+                        const order = ['AM', 'PM', 'Night', ''];
+                        return order.indexOf(a) - order.indexOf(b);
+                      }).map(([shift, issues]) => {
+                        const sl = SHIFT_LABELS[shift] ?? SHIFT_LABELS[''];
+                        return (
+                          <div key={shift} className="px-3 py-1.5">
+                            <div className={`text-[10px] font-bold ${sl.color} mb-0.5`}>{sl.label}</div>
+                            <div className="space-y-0.5">
+                              {issues.map((issue, i) => (
+                                <div key={i} className="flex items-start gap-1.5 text-[11px]">
+                                  <span className={`shrink-0 mt-px font-bold ${issue.severity === 'critical' ? 'text-red-500' : 'text-amber-400'}`}>
+                                    {issue.severity === 'critical' ? '!' : '\u25CF'}
+                                  </span>
+                                  <span className={issue.severity === 'critical' ? 'text-gray-700' : 'text-gray-500'}>
+                                    {issue.date ? `${issue.date}: ` : ''}{issue.msg}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Roster grid */}
+      <div className="bg-white rounded-lg shadow-md border border-gray-200 overflow-x-auto">
+        <table className="text-xs w-full border-collapse">
+          <thead>
+            <tr>
+              <th className="sticky left-0 bg-gray-100 z-10 px-3 py-2.5 text-left font-bold text-gray-800 border-b-2 border-r-2 border-gray-300 min-w-[150px] text-sm">
+                Employee
+              </th>
+              {days.map((day) => {
+                const dateStr = format(day, 'yyyy-MM-dd');
+                const dayNum = getDay(day);
+                const isWknd = dayNum === 0 || dayNum === 6;
+                const isSat = dayNum === 6;
+                const isToday = dateStr === todayStr;
+                // Main header sits above AM section — only show AM issues
+                const dayIssues = (coverageByDate.get(dateStr) ?? []).filter(i => i.shift === 'AM');
+                const hasCritical = dayIssues.some(i => i.severity === 'critical');
+                const hasWarn = dayIssues.length > 0 && !hasCritical;
+
+                const issueTooltip = dayIssues.length > 0
+                  ? `AM — ${format(day, 'EEE M/d')}:\n${dayIssues.map(i => `${i.severity === 'critical' ? '! ' : ''}${i.message}`).join('\n')}`
+                  : '';
+
+                return (
+                  <th
+                    key={dateStr}
+                    title={issueTooltip}
+                    onClick={() => setCoverageModal({ date: dateStr, shift: 'AM' })}
+                    className={`px-1 py-2 text-center font-bold border-b-2 min-w-[38px] cursor-pointer ${
+                      isSat ? 'border-l-2 border-l-orange-300' : ''
+                    } ${
+                      hasCritical ? 'bg-red-100 text-red-800 border-red-300' :
+                      hasWarn ? 'bg-amber-100 text-amber-800 border-amber-300' :
+                      isToday ? 'bg-blue-100 text-blue-800 border-gray-300' :
+                      isWknd ? 'bg-orange-100 text-orange-800 border-gray-300' :
+                      'bg-gray-100 text-gray-600 border-gray-300'
+                    }`}
+                  >
+                    <div className="leading-tight">
+                      <div className={`text-[10px] ${isWknd ? 'font-extrabold' : 'font-semibold'}`}>{format(day, 'EEE')}</div>
+                      <div className={`text-sm ${isWknd ? 'font-extrabold' : ''}`}>{format(day, 'd')}</div>
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {employees.map((emp, idx) => {
+              const empTimeOff = timeOffIndex.get(emp.id);
+              const prevShift = idx > 0 ? employees[idx - 1].default_shift : null;
+              const showGroupHeader = emp.default_shift !== prevShift;
+              const groupLabel = emp.default_shift === 'am' ? 'AM' : emp.default_shift === 'pm' ? 'PM' : emp.default_shift.charAt(0).toUpperCase() + emp.default_shift.slice(1);
+              return (
+                <React.Fragment key={emp.id}>
+                {showGroupHeader && (
+                  <>
+                  <tr className="bg-gray-200">
+                    <td colSpan={days.length + 1} className="sticky left-0 px-3 py-1.5 text-xs font-bold text-gray-600 uppercase tracking-wider border-b border-gray-300">
+                      {groupLabel} Shift
+                    </td>
+                  </tr>
+                  </>
+                )}
+                {showGroupHeader && emp.default_shift !== 'am' && (
+                  <tr>
+                    <td className="sticky left-0 bg-gray-100 z-10 border-r-2 border-b-2 border-gray-300 px-3 py-2 text-[10px] text-gray-400 font-medium">
+                    </td>
+                    {days.map((day) => {
+                      const dStr = format(day, 'yyyy-MM-dd');
+                      const dNum = getDay(day);
+                      const dIsWknd = dNum === 0 || dNum === 6;
+                      const dIsSat = dNum === 6;
+                      const dIsToday = dStr === todayStr;
+                      const shiftKey = emp.default_shift === 'pm' ? 'PM' : emp.default_shift === 'night' ? 'Night' : '';
+                      const dIssues = (coverageByDate.get(dStr) ?? []).filter(i => i.shift === shiftKey);
+                      const dHasCrit = dIssues.some(i => i.severity === 'critical');
+                      const dHasWarn = dIssues.length > 0 && !dHasCrit;
+
+                      const dTooltip = dIssues.length > 0
+                        ? `${shiftKey} — ${format(day, 'EEE M/d')}:\n${dIssues.map(i => `${i.severity === 'critical' ? '! ' : ''}${i.message}`).join('\n')}`
+                        : '';
+
+                      return (
+                        <td
+                          key={dStr}
+                          title={dTooltip}
+                          onClick={() => setCoverageModal({ date: dStr, shift: shiftKey })}
+                          className={`px-1 py-2 text-center font-bold border-b-2 min-w-[38px] cursor-pointer ${
+                            dIsSat ? 'border-l-2 border-l-orange-300' : ''
+                          } ${
+                            dHasCrit ? 'bg-red-100 text-red-800 border-red-300' :
+                            dHasWarn ? 'bg-amber-100 text-amber-800 border-amber-300' :
+                            dIsToday ? 'bg-blue-100 text-blue-800 border-gray-300' :
+                            dIsWknd ? 'bg-orange-100 text-orange-800 border-gray-300' :
+                            'bg-gray-100 text-gray-600 border-gray-300'
+                          }`}
+                        >
+                          <div className="leading-tight">
+                            <div className={`text-[10px] ${dIsWknd ? 'font-extrabold' : 'font-semibold'}`}>{format(day, 'EEE')}</div>
+                            <div className={`text-sm ${dIsWknd ? 'font-extrabold' : ''}`}>{format(day, 'd')}</div>
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                )}
+                <tr className="hover:bg-blue-50/40 border-b border-gray-200">
+                  <td className="sticky left-0 bg-white z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px]">
+                    <div className="flex items-center gap-1.5">
+                      <span>{emp.name}</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${
+                        emp.role === 'admin' ? 'bg-orange-100 text-orange-700' :
+                        emp.role === 'mlt' ? 'bg-cyan-100 text-cyan-700' :
+                        'bg-blue-100 text-blue-700'
+                      }`}>
+                        {emp.role}
+                      </span>
+                    </div>
+                  </td>
+                  {days.map((day) => {
+                    const dateStr = format(day, 'yyyy-MM-dd');
+                    const key = `${emp.id}-${dateStr}`;
+                    const assignment = assignmentIndex.get(key);
+                    const isOff = empTimeOff?.has(dateStr);
+                    const dayNum = getDay(day);
+                    const isWknd = dayNum === 0 || dayNum === 6;
+                    const isSat = dayNum === 6;
+                    const isToday = dateStr === todayStr;
+
+                    let cellContent: React.ReactNode;
+                    let cellBg = '';
+
+                    if (isOff) {
+                      cellContent = <span className="text-xs font-bold text-red-600">P</span>;
+                      cellBg = 'bg-red-50';
+                    } else if (assignment) {
+                      const isCrossShift = emp.default_shift !== 'floater' && assignment.shift_name.toLowerCase() !== emp.default_shift;
+                      const icon = SHIFT_ICONS[assignment.shift_name];
+                      const station = assignment.station_name
+                        ? getStationDisplay(assignment.station_name)
+                        : null;
+
+                      if (isCrossShift && icon) {
+                        // Show shift badge in home row when working a different shift
+                        cellContent = (
+                          <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${icon.bg} ${icon.text} shadow-sm ring-1 ring-inset ring-white/40`}>
+                            {icon.label}
+                          </span>
+                        );
+                      } else if (station) {
+                        cellContent = (
+                          <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${station.bg} text-white shadow-sm`}>
+                            {station.abbr}
+                          </span>
+                        );
+                      } else if (icon) {
+                        cellContent = (
+                          <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${icon.bg} ${icon.text} shadow-sm`}>
+                            {icon.label}
+                          </span>
+                        );
+                      } else {
+                        cellContent = <span className="text-[10px] font-semibold">{assignment.shift_name.charAt(0)}</span>;
+                      }
+                    } else {
+                      cellContent = <span className="text-gray-300 text-sm">&mdash;</span>;
+                    }
+
+                    return (
+                      <td
+                        key={dateStr}
+                        onClick={() => !isOff && handleCellClick(emp, dateStr)}
+                        className={`text-center py-1.5 px-0.5 cursor-pointer transition-colors hover:bg-blue-50 ${cellBg} ${
+                          isToday ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/30' : ''
+                        } ${isSat ? 'border-l-2 border-l-orange-300' : ''} ${isWknd && !isOff ? 'bg-amber-50/60' : ''}`}
+                        title={
+                          isOff ? `${emp.name} - PTO` :
+                          assignment ? `${emp.name} - ${assignment.shift_name}${assignment.station_name ? ` @ ${assignment.station_name}` : ''} (click to remove)` :
+                          `Assign ${emp.name} on ${dateStr}`
+                        }
+                      >
+                        <div className="flex items-center justify-center min-h-[24px]">
+                          {cellContent}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Guest rows: cross-shift employees working in this shift group */}
+                {(() => {
+                  const nextShift = idx < employees.length - 1 ? employees[idx + 1].default_shift : null;
+                  const isLastInGroup = nextShift !== emp.default_shift;
+                  if (!isLastInGroup) return null;
+                  const guests = crossShiftByGroup.get(emp.default_shift) ?? [];
+                  if (guests.length === 0) return null;
+                  return guests.map(({ emp: guestEmp, assignments: guestAssignments }) => {
+                    const guestAssignmentIndex = new Map<string, ScheduleAssignment>();
+                    for (const a of guestAssignments) guestAssignmentIndex.set(a.date, a);
+                    return (
+                      <tr key={`guest-${guestEmp.id}-${emp.default_shift}`} className="hover:bg-blue-50/40 border-b border-gray-200 bg-blue-50/20">
+                        <td className="sticky left-0 bg-blue-50/40 z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-500 whitespace-nowrap text-[13px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="italic">{guestEmp.name}</span>
+                            <span className={`text-[8px] px-1 py-0.5 rounded-sm font-bold uppercase bg-gray-200 text-gray-500`}>
+                              {guestEmp.default_shift}
+                            </span>
+                          </div>
+                        </td>
+                        {days.map((day) => {
+                          const dateStr = format(day, 'yyyy-MM-dd');
+                          const guestAssignment = guestAssignmentIndex.get(dateStr);
+                          const dayNum = getDay(day);
+                          const isWknd = dayNum === 0 || dayNum === 6;
+                          const isSat = dayNum === 6;
+                          const isToday = dateStr === todayStr;
+
+                          let guestCell: React.ReactNode;
+                          if (guestAssignment) {
+                            const station = guestAssignment.station_name
+                              ? getStationDisplay(guestAssignment.station_name)
+                              : null;
+                            if (station) {
+                              guestCell = (
+                                <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${station.bg} text-white shadow-sm`}>
+                                  {station.abbr}
+                                </span>
+                              );
+                            } else {
+                              const icon = SHIFT_ICONS[guestAssignment.shift_name];
+                              guestCell = icon ? (
+                                <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${icon.bg} ${icon.text} shadow-sm`}>
+                                  {icon.label}
+                                </span>
+                              ) : null;
+                            }
+                          } else {
+                            guestCell = <span className="text-gray-200 text-sm">&mdash;</span>;
+                          }
+
+                          return (
+                            <td
+                              key={dateStr}
+                              className={`text-center py-1.5 px-0.5 ${
+                                isToday ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/30' : ''
+                              } ${isSat ? 'border-l-2 border-l-orange-300' : ''} ${isWknd ? 'bg-amber-50/60' : ''}`}
+                              title={guestAssignment
+                                ? `${guestEmp.name} (normally ${guestEmp.default_shift.toUpperCase()}) - ${guestAssignment.shift_name}${guestAssignment.station_name ? ` @ ${guestAssignment.station_name}` : ''}`
+                                : ''
+                              }
+                            >
+                              <div className="flex items-center justify-center min-h-[24px]">
+                                {guestCell}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  });
+                })()}
+                </React.Fragment>
+              );
+            })}
+            {employees.length === 0 && (
+              <tr>
+                <td colSpan={days.length + 1} className="px-4 py-8 text-center text-gray-400">
+                  No employees yet. Add some on the Employees page first.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Employee Hours Summary */}
+      {assignments.length > 0 && (
+        <div className="mt-4 bg-white rounded-lg shadow-md border border-gray-200 overflow-x-auto">
+          <div className="px-4 py-2.5 border-b border-gray-200 bg-gray-50">
+            <h3 className="text-sm font-bold text-gray-700">Hours Summary — {format(currentDate, 'MMMM yyyy')}</h3>
+          </div>
+          {(() => {
+            // Build Sun-Sat week buckets from the month's days
+            const weeks: { label: string; dates: Set<string> }[] = [];
+            let currentWeekStart: Date | null = null;
+            let currentDates = new Set<string>();
+
+            for (const day of days) {
+              const dow = getDay(day);
+              if (dow === 0 && currentWeekStart !== null) {
+                // New week starts on Sunday — flush previous
+                weeks.push({ label: `${format(currentWeekStart, 'M/d')}–${format(days[days.indexOf(day) - 1], 'M/d')}`, dates: currentDates });
+                currentDates = new Set<string>();
+                currentWeekStart = day;
+              }
+              if (currentWeekStart === null) currentWeekStart = day;
+              currentDates.add(format(day, 'yyyy-MM-dd'));
+            }
+            if (currentDates.size > 0 && currentWeekStart) {
+              const lastDay = days[days.length - 1];
+              weeks.push({ label: `${format(currentWeekStart, 'M/d')}–${format(lastDay, 'M/d')}`, dates: currentDates });
+            }
+
+            return (
+              <table className="text-xs w-full">
+                <thead>
+                  <tr className="bg-gray-50 border-b">
+                    <th className="text-left px-4 py-2 font-semibold text-gray-600">Employee</th>
+                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Target</th>
+                    {weeks.map((wk, i) => (
+                      <th key={i} className="text-center px-2 py-2 font-semibold text-gray-600">{wk.label}</th>
+                    ))}
+                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Total</th>
+                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Wknd</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {employees.map((emp) => {
+                    const empDates = new Set(assignments.filter(a => a.employee_id === emp.id).map(a => a.date));
+                    const totalDays = empDates.size;
+                    const target = emp.target_hours_week;
+                    const wkndDays = [...empDates].filter(d => {
+                      const dow = getDay(new Date(d + 'T00:00:00'));
+                      return dow === 0 || dow === 6;
+                    }).length;
+
+                    return (
+                      <tr key={emp.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                        <td className="px-4 py-1.5 font-medium text-gray-800">{emp.name}</td>
+                        <td className="text-center px-3 py-1.5 text-gray-500">{target}h</td>
+                        {weeks.map((wk, i) => {
+                          const wkDays = [...wk.dates].filter(d => empDates.has(d)).length;
+                          const wkHours = wkDays * 8;
+                          const over = wkHours > target;
+                          const under = wkHours < target && wk.dates.size >= 5; // only flag under if it's a full week
+                          return (
+                            <td key={i} className="text-center px-2 py-1.5">
+                              <span className={`font-semibold ${over ? 'text-red-600' : under ? 'text-amber-600' : 'text-gray-700'}`}>
+                                {wkHours}h
+                              </span>
+                            </td>
+                          );
+                        })}
+                        <td className="text-center px-3 py-1.5 font-bold text-gray-800">{totalDays * 8}h</td>
+                        <td className="text-center px-3 py-1.5 text-gray-600">{wkndDays}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
+        </div>
+      )}
+
+      {modal && (
+        <AssignmentModal
+          date={modal.date}
+          shift={modal.shift}
+          month={month}
+          preselectedEmployee={modal.employee}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {/* Confirm Dialog */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setConfirmDialog(null)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4">
+              <h3 className="text-base font-bold text-gray-900">{confirmDialog.title}</h3>
+              <p className="text-sm text-gray-600 mt-2 leading-relaxed">{confirmDialog.message}</p>
+            </div>
+            <div className="px-5 py-3 bg-gray-50 flex justify-end gap-2 border-t border-gray-100">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDialog.onConfirm}
+                className={`px-4 py-2 text-sm font-medium text-white rounded-lg ${confirmDialog.confirmColor ?? 'bg-blue-600 hover:bg-blue-700'}`}
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Coverage Gap Modal */}
+      {coverageModal && (() => {
+        const { date, shift } = coverageModal;
+        const dayDate = new Date(date + 'T00:00:00');
+        const issues = (coverageByDate.get(date) ?? []).filter(i => i.shift === shift);
+        const allDayIssues = coverageByDate.get(date) ?? [];
+
+        // Find who's working this shift on this date
+        const shiftAssignments = assignments.filter(a => a.date === date && a.shift_name === shift);
+        // Find who's off
+        const offEmployees = employees.filter(emp => timeOffIndex.get(emp.id)?.has(date));
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setCoverageModal(null)}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className={`px-5 py-3 rounded-t-xl flex items-center justify-between ${
+                issues.some(i => i.severity === 'critical') ? 'bg-red-500'
+                : issues.length > 0 ? 'bg-amber-500'
+                : 'bg-emerald-500'
+              }`}>
+                <div>
+                  <h3 className="text-white font-bold text-base">{shift} Shift — {format(dayDate, 'EEE, MMM d')}</h3>
+                  <p className="text-white/80 text-xs">
+                    {issues.length > 0
+                      ? `${issues.length} issue${issues.length !== 1 ? 's' : ''} on this shift`
+                      : `${shiftAssignments.length} staff assigned`
+                    }
+                  </p>
+                </div>
+                <button onClick={() => setCoverageModal(null)} className="text-white/70 hover:text-white text-xl font-bold">&times;</button>
+              </div>
+
+              <div className="p-5 space-y-4 max-h-[60vh] overflow-y-auto">
+                {/* Issues */}
+                {issues.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Issues</h4>
+                    <div className="space-y-1.5">
+                      {issues.map((issue, i) => (
+                        <div key={i} className={`flex items-start gap-2 px-3 py-2 rounded-lg text-sm ${
+                          issue.severity === 'critical' ? 'bg-red-50 text-red-800' : 'bg-amber-50 text-amber-800'
+                        }`}>
+                          <span className="font-bold shrink-0 mt-0.5">{issue.severity === 'critical' ? '!' : '~'}</span>
+                          <div>
+                            <div className="font-medium">{issue.message}</div>
+                            {issue.station && <div className="text-xs opacity-70 mt-0.5">Station: {issue.station}</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Who's working — grouped by station */}
+                <div>
+                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                    Working {shift} ({shiftAssignments.length})
+                  </h4>
+                  {shiftAssignments.length > 0 ? (() => {
+                    // Group assignments by station
+                    const stationGroups = new Map<string, typeof shiftAssignments>();
+                    for (const a of shiftAssignments) {
+                      const sName = a.station_name || 'Unassigned';
+                      if (!stationGroups.has(sName)) stationGroups.set(sName, []);
+                      stationGroups.get(sName)!.push(a);
+                    }
+                    // Sort: real stations first (by STATION_STYLES order), Admin last
+                    const stationOrder = ['Hematology/UA', 'Chemistry', 'Microbiology', 'Blood Bank', 'Admin', 'Unassigned'];
+                    const sortedStations = [...stationGroups.keys()].sort((a, b) => {
+                      const ai = stationOrder.indexOf(a); const bi = stationOrder.indexOf(b);
+                      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+                    });
+                    return (
+                      <div className="space-y-2">
+                        {sortedStations.map(sName => {
+                          const group = stationGroups.get(sName)!;
+                          const stationDisplay = getStationDisplay(sName);
+                          return (
+                            <div key={sName}>
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${stationDisplay.bg} text-white`}>
+                                  {stationDisplay.abbr}
+                                </span>
+                                <span className="text-xs font-semibold text-gray-600">{sName}</span>
+                                <span className="text-[10px] text-gray-400">({group.length})</span>
+                              </div>
+                              <div className="space-y-0.5 pl-1">
+                                {group.map(a => {
+                                  const empInfo = employees.find(e => e.id === a.employee_id);
+                                  const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
+                                    : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
+                                    : 'bg-blue-100 text-blue-700';
+                                  return (
+                                    <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
+                                      <span className="font-medium text-gray-800">{a.employee_name}</span>
+                                      <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
+                                        {empInfo?.role ?? '?'}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })() : (
+                    <p className="text-sm text-red-500 italic px-3">No one assigned to this shift</p>
+                  )}
+                </div>
+
+                {/* Who's off */}
+                {offEmployees.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                      Off / PTO ({offEmployees.length})
+                    </h4>
+                    <div className="flex flex-wrap gap-1.5">
+                      {offEmployees.map(emp => {
+                        const offRoleBg = emp.role === 'admin' ? 'bg-orange-100 text-orange-700'
+                          : emp.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
+                          : 'bg-blue-100 text-blue-700';
+                        return (
+                          <span key={emp.id} className="px-2 py-1 bg-red-50 text-red-600 rounded text-xs font-medium flex items-center gap-1">
+                            {emp.name}
+                            <span className={`text-[8px] px-1 py-0.5 rounded-sm font-bold uppercase ${offRoleBg}`}>{emp.role}</span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Other shifts summary */}
+                {['AM', 'PM', 'Night'].filter(s => s !== shift).map(otherShift => {
+                  const otherIssues = allDayIssues.filter(i => i.shift === otherShift);
+                  if (otherIssues.length === 0) return null;
+                  return (
+                    <div key={otherShift} className="pt-2 border-t border-gray-100">
+                      <button
+                        onClick={() => setCoverageModal({ date, shift: otherShift })}
+                        className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                      >
+                        {otherShift} shift has {otherIssues.length} issue{otherIssues.length !== 1 ? 's' : ''} &rarr;
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}

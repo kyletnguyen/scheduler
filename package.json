@@ -1,0 +1,76 @@
+{
+  "name": "shift-scheduler",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Lab Shift Scheduler",
+  "main": "electron/main.cjs",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w client && npm run build -w server",
+    "build:copy-migrations": "node -e \"require('fs').cpSync('server/src/db/migrations', 'server/dist/db/migrations', {recursive:true})\"",
+    "build:all": "npm run build && npm run build:copy-migrations",
+    "electron:deps": "node scripts/prepare-electron.cjs",
+    "electron:rebuild-deps": "npx @electron/rebuild --module-dir electron-deps/node_modules/better-sqlite3",
+    "electron:dev": "npm run build:all && electron .",
+    "electron:build": "npm run build:all && npm run electron:deps && npm run electron:rebuild-deps && electron-builder --win",
+    "electron:build:mac": "npm run build:all && npm run electron:deps && npm run electron:rebuild-deps && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.labscheduler.app",
+    "productName": "Lab Scheduler",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "npmRebuild": false,
+    "files": [
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "electron-deps",
+        "to": "app-resources",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": null,
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.business"
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild",
+      "electron",
+      "core-js"
+    ]
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.4.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.0"
+  }
+}
