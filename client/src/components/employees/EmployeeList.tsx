@@ -1,11 +1,20 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { format, addMonths } from 'date-fns';
 import { useEmployees, useCreateEmployee, useDeleteEmployee } from '../../hooks/useEmployees';
+import { useSchedule } from '../../hooks/useSchedule';
 import { useTimeOff } from '../../hooks/useTimeOff';
 import EmployeeForm from './EmployeeForm';
 import EmployeeModal from './EmployeeModal';
 import type { Employee, DefaultShift } from '../../types';
 import toast from 'react-hot-toast';
+
+const STATION_STYLES: Record<string, { abbr: string; bg: string }> = {
+  'Hematology/UA': { abbr: 'HM', bg: 'bg-violet-500' },
+  'Chemistry':     { abbr: 'CH', bg: 'bg-amber-500' },
+  'Microbiology':  { abbr: 'MC', bg: 'bg-emerald-500' },
+  'Blood Bank':    { abbr: 'BB', bg: 'bg-red-500' },
+  'Admin':         { abbr: 'AD', bg: 'bg-sky-500' },
+};
 
 const typeColors: Record<string, string> = {
   'full-time': 'bg-green-100 text-green-800',
@@ -64,6 +73,10 @@ export default function EmployeeList() {
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [modalEmployee, setModalEmployee] = useState<Employee | null>(null);
+  const [expandedEmp, setExpandedEmp] = useState<number | null>(null);
+
+  const scheduleMonth = format(new Date(), 'yyyy-MM');
+  const { data: scheduleData = [] } = useSchedule(scheduleMonth);
   const [search, setSearch] = useState('');
   const [filterShift, setFilterShift] = useState<string>('');
   const [filterRole, setFilterRole] = useState<string>('');
@@ -224,12 +237,19 @@ export default function EmployeeList() {
           </thead>
           <tbody>
             {filteredEmployees.map((emp) => (
+            <React.Fragment key={emp.id}>
               <tr
-                key={emp.id}
                 onClick={() => setModalEmployee(emp)}
                 className="border-b last:border-0 hover:bg-blue-50/50 cursor-pointer transition-colors"
               >
-                <td className="px-4 py-3 font-medium text-gray-900">{emp.name}</td>
+                <td className="px-4 py-3 font-medium text-gray-900">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setExpandedEmp(expandedEmp === emp.id ? null : emp.id); }}
+                    className="hover:text-blue-600 hover:underline transition-colors text-left"
+                  >
+                    {emp.name}
+                  </button>
+                </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-1.5">
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${typeColors[emp.employment_type]}`}>
@@ -290,6 +310,58 @@ export default function EmployeeList() {
                   </button>
                 </td>
               </tr>
+              {expandedEmp === emp.id && (() => {
+                const empSchedule = scheduleData.filter(a => a.employee_id === emp.id);
+                const stationCounts: Record<string, number> = {};
+                const stationDates: Record<string, string[]> = {};
+                for (const a of empSchedule) {
+                  const s = a.station_name || 'Unassigned';
+                  stationCounts[s] = (stationCounts[s] || 0) + 1;
+                  if (!stationDates[s]) stationDates[s] = [];
+                  stationDates[s].push(a.date);
+                }
+                const sorted = Object.entries(stationCounts).sort(([,a],[,b]) => b - a);
+                return (
+                  <tr className="bg-blue-50 border-b">
+                    <td colSpan={5} className="px-4 py-3">
+                      <div className="text-xs space-y-2">
+                        <div className="font-semibold text-gray-700">
+                          {format(new Date(scheduleMonth + '-01T00:00:00'), 'MMMM yyyy')} — {empSchedule.length} day{empSchedule.length !== 1 ? 's' : ''} scheduled
+                        </div>
+                        {sorted.length > 0 ? (
+                          <div className="space-y-1.5">
+                            {sorted.map(([station, count]) => {
+                              const style = STATION_STYLES[station] ?? { abbr: station.substring(0, 2).toUpperCase(), bg: 'bg-gray-400' };
+                              const dates = stationDates[station].sort();
+                              return (
+                                <div key={station} className="flex items-start gap-2">
+                                  <span className={`${style.bg} text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0`}>
+                                    {style.abbr}
+                                  </span>
+                                  <div>
+                                    <span className="font-medium text-gray-700">{station}</span>
+                                    <span className="text-gray-400 ml-1">({count} day{count !== 1 ? 's' : ''})</span>
+                                    <div className="flex flex-wrap gap-1 mt-0.5">
+                                      {dates.map(d => (
+                                        <span key={d} className="text-[9px] text-gray-500 bg-white px-1.5 py-0.5 rounded">
+                                          {format(new Date(d + 'T00:00:00'), 'M/d')}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-gray-400 italic">No schedule data for this month</div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })()}
+            </React.Fragment>
             ))}
             {filteredEmployees.length === 0 && (
               <tr>
