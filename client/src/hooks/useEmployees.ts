@@ -17,7 +17,7 @@ export function useCreateEmployee() {
 export function useUpdateEmployee() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...data }: { id: number; name: string; employment_type: Employee['employment_type']; target_hours_week: number; default_shift: DefaultShift }) =>
+    mutationFn: ({ id, ...data }: { id: number; name: string; employment_type: Employee['employment_type']; target_hours_week: number; default_shift: DefaultShift; role: Employee['role'] }) =>
       updateEmployee(id, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
   });

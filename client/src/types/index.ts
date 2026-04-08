@@ -7,7 +7,7 @@ export interface Shift {
 }
 
 export type DefaultShift = 'am' | 'pm' | 'night' | 'floater';
-export type RuleType = 'weekend_availability' | 'weekend_group' | 'blocked_day' | 'max_consecutive_days' | 'custom_block' | 'required_shift';
+export type RuleType = 'weekend_availability' | 'weekend_group' | 'weekend_off_pattern' | 'blocked_day' | 'shift_restriction' | 'max_consecutive_days' | 'custom_block' | 'required_shift';
 
 export interface EmployeeConstraint {
   id: number;

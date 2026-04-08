@@ -28,6 +28,7 @@ export async function updateEmployee(id: number, data: {
   employment_type: Employee['employment_type'];
   target_hours_week: number;
   default_shift: DefaultShift;
+  role: Employee['role'];
 }): Promise<Employee> {
   const res = await fetch(`${BASE}/${id}`, {
     method: 'PUT',
