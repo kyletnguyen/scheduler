@@ -53,6 +53,7 @@ export default function MonthGrid() {
   const [modal, setModal] = useState<{ date: string; shift: Shift; employee?: Employee } | null>(null);
   const [showWarnings, setShowWarnings] = useState(true);
   const [coverageModal, setCoverageModal] = useState<{ date: string; shift: string } | null>(null);
+  const [employeeDetail, setEmployeeDetail] = useState<number | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     message: string;
@@ -1075,7 +1076,7 @@ export default function MonthGrid() {
         const offEmployees = employees.filter(emp => timeOffIndex.get(emp.id)?.has(date));
 
         return (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setCoverageModal(null)}>
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => { setCoverageModal(null); setEmployeeDetail(null); }}>
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
               {/* Header */}
               <div className={`px-5 py-3 rounded-t-xl flex items-center justify-between ${
@@ -1092,7 +1093,7 @@ export default function MonthGrid() {
                     }
                   </p>
                 </div>
-                <button onClick={() => setCoverageModal(null)} className="text-white/70 hover:text-white text-xl font-bold">&times;</button>
+                <button onClick={() => { setCoverageModal(null); setEmployeeDetail(null); }} className="text-white/70 hover:text-white text-xl font-bold">&times;</button>
               </div>
 
               <div className="p-5 space-y-4 max-h-[60vh] overflow-y-auto">
@@ -1155,12 +1156,45 @@ export default function MonthGrid() {
                                   const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
                                     : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
                                     : 'bg-blue-100 text-blue-700';
+                                  const isExpanded = employeeDetail === a.employee_id;
+                                  // Build monthly stats for this employee
+                                  const empAssignments = isExpanded ? assignments.filter(x => x.employee_id === a.employee_id) : [];
+                                  const stationCounts: Record<string, number> = {};
+                                  for (const x of empAssignments) {
+                                    const s = x.station_name || 'Unassigned';
+                                    stationCounts[s] = (stationCounts[s] || 0) + 1;
+                                  }
                                   return (
-                                    <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
-                                      <span className="font-medium text-gray-800">{a.employee_name}</span>
-                                      <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
-                                        {empInfo?.role ?? '?'}
-                                      </span>
+                                    <div key={a.id}>
+                                      <div
+                                        className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm cursor-pointer hover:bg-gray-100 transition-colors"
+                                        onClick={() => setEmployeeDetail(isExpanded ? null : a.employee_id)}
+                                      >
+                                        <span className="font-medium text-gray-800">{a.employee_name}</span>
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
+                                          {empInfo?.role ?? '?'}
+                                        </span>
+                                        <span className="text-[10px] text-gray-400 ml-auto">{empAssignments.length || ''} {isExpanded ? '\u25B2' : '\u25BC'}</span>
+                                      </div>
+                                      {isExpanded && (
+                                        <div className="ml-4 mt-1 mb-2 px-3 py-2 bg-blue-50 rounded text-xs space-y-1.5">
+                                          <div className="font-semibold text-gray-700">
+                                            {empAssignments.length} day{empAssignments.length !== 1 ? 's' : ''} this month
+                                          </div>
+                                          <div className="flex flex-wrap gap-1.5">
+                                            {Object.entries(stationCounts)
+                                              .sort(([,a],[,b]) => b - a)
+                                              .map(([station, count]) => {
+                                                const sd = getStationDisplay(station);
+                                                return (
+                                                  <span key={station} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${sd.bg} text-white text-[10px] font-semibold`}>
+                                                    {sd.abbr} {count}d
+                                                  </span>
+                                                );
+                                              })}
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
                                   );
                                 })}
