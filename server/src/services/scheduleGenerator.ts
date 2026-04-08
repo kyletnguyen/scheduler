@@ -689,10 +689,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     const dow = getDow(dateStr);
     if (dow === 0 || dow === 6) {
       const sat = weekendSat(dateStr);
-      if (!employeeOnWeekends.get(empId)?.has(sat)) return false;
+      const emp = employees.find(e => e.id === empId);
+      // Per-diem: alternating is a preference, not a hard block — they can fill any weekend if needed
+      if (!employeeOnWeekends.get(empId)?.has(sat)) {
+        if (emp?.employment_type !== 'per-diem') return false;
+      }
 
       // Only 1 admin per weekend day
-      const emp = employees.find(e => e.id === empId);
       if (emp?.role === 'admin' && (adminWeekendCount.get(dateStr) ?? 0) >= 1) {
         return false;
       }
@@ -943,12 +946,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // PHASE 3: Weekly station assignment with rotation
-  // Multi-pass: run station assignment multiple times with different
-  // employee orderings, count criticals, keep the best result.
+  // PHASE 3: Station assignment — layered pipeline
+  // Each day+shift is processed through 7 layers in order.
+  // Each layer locks its assignments so later layers cannot undo them.
+  // Multi-pass: run 25 passes with shuffled orderings, keep best.
   // ═══════════════════════════════════════════════════════════════
 
-  const NUM_STATION_PASSES = 10;
+  const NUM_STATION_PASSES = 25;
 
   // Helper: shuffle array (Fisher-Yates)
   const shuffle = <T>(arr: T[]): T[] => {
@@ -960,47 +964,70 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     return a;
   };
 
-  // Helper: count criticals from a set of station assignments
-  const countCriticals = (assignments: Assignment[], stns: typeof stations, shfts: typeof shifts) => {
+  // Helper: is this employee CLS-equivalent? (CLS or admin role)
+  const isCLSRole = (empId: number, empRoleMap: Map<number, string>) => {
+    const r = empRoleMap.get(empId);
+    return r === 'cls' || r === 'admin';
+  };
+
+  // Helper: get min staff for a station on a given shift
+  const getMinStaff = (station: Station, shiftName: string): number => {
+    if (shiftName === 'am') return (station as any).min_staff_am ?? station.min_staff ?? 1;
+    if (shiftName === 'pm') return (station as any).min_staff_pm ?? station.min_staff ?? 1;
+    if (shiftName === 'night') return (station as any).min_staff_night ?? station.min_staff ?? 1;
+    return station.min_staff ?? 1;
+  };
+
+  // Helper: count criticals + pivotals + rotation penalty for scoring passes
+  const scorePass = (
+    assignments: Assignment[],
+    stns: typeof stations,
+    shfts: typeof shifts,
+    empRoleMap: Map<number, string>,
+  ): { criticals: number; pivotals: number; rotationPenalty: number; total: number } => {
     const realStns = stns.filter(s => s.name !== 'Admin');
+    const adminStn = stns.find(s => s.name === 'Admin');
     let criticals = 0;
-    const empRoles = new Map<number, string>();
-    for (const emp of employees) empRoles.set(emp.id, emp.role);
-    // Group by shift+date
+    let pivotals = 0;
+
     const groups = new Map<string, Assignment[]>();
     for (const a of assignments) {
       const key = `${a.shift_id}-${a.date}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(a);
     }
+
     for (const [, group] of groups) {
       const shiftName = shfts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
       for (const station of realStns) {
-        const minNeeded = shiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-          : shiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-          : shiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-          : station.min_staff ?? 1;
-        const maxAllowed = (station as any).max_staff ?? 99;
+        const minNeeded = getMinStaff(station, shiftName);
+        const maxAllowed = station.max_staff ?? 99;
         const stationAssignees = group.filter(a => a.station_id === station.id);
+
+        // Understaffed
         if (stationAssignees.length < minNeeded) {
-          // On weekends, Hema/Chem share an MLT float — don't penalize individual understaffing
           const dow = getDow(group[0].date);
           const isWkend = dow === 0 || dow === 6;
           const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
           if (!(isWkend && isHemaOrChem)) criticals++;
         }
-        if (stationAssignees.length > maxAllowed) criticals += 2; // over max is bad
-        // Penalize 2+ MLTs at the same station
-        const mltCount = stationAssignees.filter(a => empRoles.get(a.employee_id) === 'mlt').length;
+        // Overstaffed
+        if (stationAssignees.length > maxAllowed) criticals += 10;
+        // 2+ MLTs at same station
+        const mltCount = stationAssignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
         if (mltCount > 1) criticals += 3 * (mltCount - 1);
+        // Missing CLS at require_cls station
+        if (station.require_cls === 1 && stationAssignees.length > 0) {
+          if (!stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap))) pivotals++;
+        }
       }
     }
-    // Add rotation penalty: penalize poor station diversity and consecutive same-station
-    const empWeekStation = new Map<string, Map<string, number>>(); // "empId-shiftId" -> weekStart -> stationId
-    const adminStn = stns.find(s => s.name === 'Admin');
+
+    // Rotation penalty
+    let rotationPenalty = 0;
+    const empWeekStation = new Map<string, Map<string, number>>();
     for (const a of assignments) {
-      if (a.station_id === null) continue;
-      if (adminStn && a.station_id === adminStn.id) continue;
+      if (a.station_id === null || (adminStn && a.station_id === adminStn.id)) continue;
       const ws = (() => { const d = new Date(a.date + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
       const key = `${a.employee_id}-${a.shift_id}`;
       if (!empWeekStation.has(key)) empWeekStation.set(key, new Map());
@@ -1009,25 +1036,25 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     for (const [empKey, weekMap] of empWeekStation) {
       const empId = parseInt(empKey.split('-')[0]);
       const realQual = (empStationMap.get(empId) ?? []).filter(sid => !adminStn || sid !== adminStn.id);
-      if (realQual.length <= 1) continue; // locked, ignore
-
+      if (realQual.length <= 1) continue;
       const weeks = [...weekMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-      // Consecutive penalty: 2 per back-to-back same station
       for (let i = 1; i < weeks.length; i++) {
-        if (weeks[i][1] === weeks[i - 1][1]) criticals += 2;
+        if (weeks[i][1] === weeks[i - 1][1]) rotationPenalty += 2;
       }
-      // Diversity penalty: if they have 3+ station options but only visited 2, penalize
       const uniqueStations = new Set(weeks.map(w => w[1])).size;
-      if (realQual.length >= 3 && weeks.length >= 3 && uniqueStations <= 2) {
-        criticals += 3; // stuck alternating between 2 stations
-      }
+      if (realQual.length >= 3 && weeks.length >= 3 && uniqueStations <= 2) rotationPenalty += 3;
     }
 
-    return criticals;
+    return {
+      criticals,
+      pivotals,
+      rotationPenalty,
+      total: criticals * 10000 + pivotals * 100 + rotationPenalty,
+    };
   };
 
-  let bestStationAssignments: Map<string, number> | null = null; // "empId-date" -> stationId
-  let bestCriticalCount = Infinity;
+  let bestStationAssignments: Map<string, number> | null = null;
+  let bestScore = Infinity;
 
   if (stations.length > 0) {
     // ── Stable data computed once before multi-pass loop ──
@@ -1035,16 +1062,20 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     for (const emp of employees) empRoleMap.set(emp.id, emp.role);
     const adminStation = stations.find(s => s.name === 'Admin');
     const realStations = stations.filter(s => s.name !== 'Admin');
+    const bloodBankStation = stations.find(s => s.name === 'Blood Bank');
 
-    const getWeekStart = (dateStr: string) => {
-      const d = new Date(dateStr + 'T12:00:00');
-      const day = d.getDay();
-      d.setDate(d.getDate() - day);
-      return d.toISOString().slice(0, 10);
+    // Helper: is employee admin-parked? (first station = Admin but role != admin, e.g. Shayna)
+    const isAdminParked = (empId: number) => {
+      const quals = empStationMap.get(empId);
+      return quals && adminStation && quals[0] === adminStation.id && empRoleMap.get(empId) !== 'admin';
     };
 
+    // Helper: get bench qualifications (stations excluding Admin)
+    const getBenchQuals = (empId: number) =>
+      (empStationMap.get(empId) ?? []).filter(sid => !adminStation || sid !== adminStation.id);
+
     // Seed rotation history from previous month's DB data
-    const seedHistory = new Map<string, number>();
+    const seedHistory = new Map<string, number>(); // "empId-stationId" -> count
     const [yearNum, monNum] = month.split('-').map(Number);
     const prevMonth = monNum === 1
       ? `${yearNum - 1}-12`
@@ -1056,12 +1087,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       ORDER BY sa.date
     `).all(prevMonth) as { employee_id: number; station_id: number; date: string }[];
 
+    const getWeekStart = (dateStr: string) => {
+      const d = new Date(dateStr + 'T12:00:00');
+      d.setDate(d.getDate() - d.getDay());
+      return d.toISOString().slice(0, 10);
+    };
+
     const prevWeekStations = new Map<string, number>();
     for (const pa of prevAssigns) {
-      const d = new Date(pa.date + 'T12:00:00');
-      const day = d.getDay();
-      d.setDate(d.getDate() - day);
-      const ws = d.toISOString().slice(0, 10);
+      const ws = getWeekStart(pa.date);
       prevWeekStations.set(`${pa.employee_id}-${ws}-${pa.station_id}`, 1);
     }
     for (const [key] of prevWeekStations) {
@@ -1072,26 +1106,19 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       seedHistory.set(hk, (seedHistory.get(hk) ?? 0) + 1);
     }
 
-    // Seed last-week tracking from last week of previous month
-    // seedLastWeekMLT: "empId-shiftId" -> stationId (for MLT optimizer consecutive penalty)
-    // seedLastWeekStation: "empId-shiftId" -> stationId (for ALL employees consecutive penalty)
-    const seedLastWeekMLT = new Map<string, number>();
-    const seedLastWeekStation = new Map<string, number>();
+    // Seed last-week station tracking
+    const seedLastWeekStation = new Map<number, number>(); // empId -> stationId
     if (prevAssigns.length > 0) {
       const lastPrevDate = prevAssigns[prevAssigns.length - 1].date;
-      const lastPrevWeekStart = getWeekStart(lastPrevDate);
-      const lastWeekAssigns = prevAssigns.filter(pa => getWeekStart(pa.date) === lastPrevWeekStart);
-      for (const pa of lastWeekAssigns) {
-        const shiftRow = db.prepare('SELECT shift_id FROM schedule_assignments WHERE employee_id = ? AND date = ? AND station_id = ?')
-          .get(pa.employee_id, pa.date, pa.station_id) as { shift_id: number } | undefined;
-        if (shiftRow) {
-          seedLastWeekMLT.set(`${pa.employee_id}-${shiftRow.shift_id}`, pa.station_id);
-          seedLastWeekStation.set(`${pa.employee_id}-${shiftRow.shift_id}`, pa.station_id);
+      const lastPrevWeek = getWeekStart(lastPrevDate);
+      for (const pa of prevAssigns) {
+        if (getWeekStart(pa.date) === lastPrevWeek && pa.station_id) {
+          seedLastWeekStation.set(pa.employee_id, pa.station_id);
         }
       }
     }
 
-    // Group assignments by shift+date (stable grouping — same objects, only station_id changes per pass)
+    // Group assignments by shift+date
     const shiftDateGroups = new Map<string, Assignment[]>();
     for (const a of result) {
       const key = `${a.shift_id}-${a.date}`;
@@ -1099,1666 +1126,687 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       shiftDateGroups.get(key)!.push(a);
     }
 
-    const weekShiftGroups = new Map<string, string[]>();
-    for (const [key] of shiftDateGroups) {
-      const dashIdx = key.indexOf('-');
-      const sid = key.substring(0, dashIdx);
-      const dt = key.substring(dashIdx + 1);
-      const ws = getWeekStart(dt);
-      const wsKey = `${ws}-${sid}`;
-      if (!weekShiftGroups.has(wsKey)) weekShiftGroups.set(wsKey, []);
-      weekShiftGroups.get(wsKey)!.push(dt);
-    }
+    // Sort day+shift groups chronologically
+    const sortedGroupKeys = [...shiftDateGroups.keys()].sort((a, b) => {
+      const aDate = a.substring(a.indexOf('-') + 1);
+      const bDate = b.substring(b.indexOf('-') + 1);
+      if (aDate !== bDate) return aDate.localeCompare(bDate);
+      return a.localeCompare(b);
+    });
 
-    const sortedWeekShiftKeys = [...weekShiftGroups.keys()].sort();
+    // ══════════════════════════════════════════════════════════════
+    // LAYER FUNCTIONS — each processes one day+shift group
+    // ══════════════════════════════════════════════════════════════
 
-    // ── Multi-pass loop: try different orderings, keep best ──
-    let bestPassWarnings: string[] = [];
-    for (let passIdx = 0; passIdx < NUM_STATION_PASSES; passIdx++) {
-    // Reset all station assignments and rotation tracking for this pass
-    for (const a of result) a.station_id = null as any;
-    const weeklyStationHistory = new Map(seedHistory);
-    const lastWeekMLT = new Map(seedLastWeekMLT);
-    const lastWeekStation = new Map(seedLastWeekStation); // "empId-shiftId" -> stationId (all employees)
-    const passWarnings: string[] = [];
+    // ── Layer 1: Blood Bank — assign exactly 1 CLS, rotate fairly ──
+    function layer1_bloodBank(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      bbRotation: Map<number, number>,
+      passIdx: number,
+    ) {
+      if (!bloodBankStation) return;
+      const bbQualified = pool.filter(a =>
+        !locked.has(a.employee_id)
+        && isCLSRole(a.employee_id, empRoleMap)
+        && empRoleMap.get(a.employee_id) !== 'mlt'
+        && empStationMap.get(a.employee_id)!.includes(bloodBankStation.id)
+        && !isAdminParked(a.employee_id)
+        && employees.find(e => e.id === a.employee_id)?.employment_type !== 'per-diem'
+      );
+      if (bbQualified.length === 0) return;
 
-    for (const wsKey of sortedWeekShiftKeys) {
-      const [weekStart, shiftId] = [wsKey.substring(0, 10), wsKey.substring(11)];
-      const weekDates = weekShiftGroups.get(wsKey)!.sort();
-      const shiftIdNum = parseInt(shiftId);
-      const groupShiftName = shifts.find(s => s.id === shiftIdNum)?.name?.toLowerCase() ?? '';
-
-      // Collect all employees working this shift in this week
-      const weekEmployeeIds = new Set<number>();
-      const dailyGroups: Assignment[][] = [];
-      for (const date of weekDates) {
-        const group = shiftDateGroups.get(`${shiftId}-${date}`);
-        if (group) {
-          dailyGroups.push(group);
-          for (const a of group) weekEmployeeIds.add(a.employee_id);
-        }
-      }
-
-      // Split into non-admin and admin pools
-      // Shuffle employee order on subsequent passes for variety
-      const nonAdminIds = passIdx === 0
-        ? [...weekEmployeeIds].filter(id => empRoleMap.get(id) !== 'admin')
-        : shuffle([...weekEmployeeIds].filter(id => empRoleMap.get(id) !== 'admin'));
-      const adminIds = [...weekEmployeeIds].filter(id => empRoleMap.get(id) === 'admin');
-
-      // Build scarcity: how many non-admin employees can cover each real station this week
-      const stationsByScarcity = [...realStations].filter(s => {
-        return nonAdminIds.some(id => empStationMap.get(id)?.includes(s.id));
-      }).sort((a, b) => {
-        const aCount = nonAdminIds.filter(id => empStationMap.get(id)!.includes(a.id)).length;
-        const bCount = nonAdminIds.filter(id => empStationMap.get(id)!.includes(b.id)).length;
-        return aCount - bCount;
+      // Sort by fewest BB assignments (fair rotation), break ties by shuffle on subsequent passes
+      const sorted = [...bbQualified].sort((a, b) => {
+        const aCount = bbRotation.get(a.employee_id) ?? 0;
+        const bCount = bbRotation.get(b.employee_id) ?? 0;
+        if (aCount !== bCount) return aCount - bCount;
+        // On pass 0 use stable order; on later passes, randomize ties
+        return passIdx === 0 ? a.employee_id - b.employee_id : Math.random() - 0.5;
       });
 
-      // Pre-compute sole MLT reservations for this week's pool
-      const mltReservedFor = new Map<number, number>();
-      for (const station of stationsByScarcity) {
-        if (station.require_cls !== 1) continue;
-        const availableMLTs = nonAdminIds.filter(
-          id => empStationMap.get(id)!.includes(station.id) && empRoleMap.get(id) === 'mlt'
+      const chosen = sorted[0];
+      stationMap.set(chosen.employee_id, bloodBankStation.id);
+      locked.add(chosen.employee_id);
+      bbRotation.set(chosen.employee_id, (bbRotation.get(chosen.employee_id) ?? 0) + 1);
+    }
+
+    // ── Layer 2: MLT Placement — exactly 1 MLT per require_cls station ──
+    function layer2_mltPlacement(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      mltHistory: Map<string, number>,
+      lastWeekMLT: Map<number, number>,
+      passIdx: number,
+    ) {
+      const mltStations = realStations.filter(s => s.require_cls === 1);
+      // Available MLTs: not locked, not admin-parked, not per-diem, actual MLT role
+      const availableMLTs = pool
+        .filter(a =>
+          !locked.has(a.employee_id)
+          && empRoleMap.get(a.employee_id) === 'mlt'
+          && !isAdminParked(a.employee_id)
+          && employees.find(e => e.id === a.employee_id)?.employment_type !== 'per-diem'
+        )
+        .map(a => a.employee_id);
+
+      // Deduplicate (same employee may appear in pool for multiple days in the week)
+      const mltPool = [...new Set(availableMLTs)];
+
+      // Pre-lock MLTs with only 1 bench station — they MUST go there
+      const lockedMLTStations = new Set<number>();
+      for (const empId of mltPool) {
+        const benchQuals = getBenchQuals(empId).filter(sid =>
+          mltStations.some(s => s.id === sid)
         );
-        if (availableMLTs.length === 1 && !mltReservedFor.has(availableMLTs[0])) {
-          mltReservedFor.set(availableMLTs[0], station.id);
+        if (benchQuals.length === 1) {
+          stationMap.set(empId, benchQuals[0]);
+          locked.add(empId);
+          lockedMLTStations.add(benchQuals[0]);
         }
       }
 
-      // Assign each non-admin employee a station for the week
-      const weekAssignment = new Map<number, number>(); // empId -> stationId
-      const used = new Set<number>();
+      // Brute-force optimizer for remaining MLTs (pool is small: ~3 stations x ~3 MLTs)
+      const remainingMLTs = mltPool.filter(id => !locked.has(id));
+      const remainingStations = mltStations.filter(s => !lockedMLTStations.has(s.id));
 
-      // Pre-lock MLTs with only 1 real station — they MUST go there regardless of optimizer
-      const lockedMLTs = new Map<number, number>(); // empId -> stationId
-      const stationsWithLockedMLT = new Set<number>();
-      for (const id of nonAdminIds) {
-        if (used.has(id)) continue;
-        // Skip admin-preferred (inline check — isAdminPreferred not defined yet)
-        if (adminStation && empStationMap.get(id)![0] === adminStation.id) continue;
-        if (empRoleMap.get(id) !== 'mlt') continue;
-        const realQual = empStationMap.get(id)!.filter(sid => !adminStation || sid !== adminStation.id);
-        if (realQual.length === 1) {
-          lockedMLTs.set(id, realQual[0]);
-          stationsWithLockedMLT.add(realQual[0]);
-          weekAssignment.set(id, realQual[0]);
-          used.add(id);
-        }
-      }
+      if (remainingMLTs.length === 0 || remainingStations.length === 0) return;
 
-      // Pre-pass: plan MLT assignments globally with rotation
-      // Use brute-force search over all valid MLT→station assignments (pool is small)
-      const mltStations = stationsByScarcity.filter(s => s.require_cls === 1);
-      // Exclude Admin-preferred MLTs (e.g. Shayna) and already-locked MLTs from optimizer
-      const mltPool = nonAdminIds.filter(id =>
-        empRoleMap.get(id) === 'mlt' &&
-        !lockedMLTs.has(id) &&
-        !(adminStation && empStationMap.get(id)![0] === adminStation.id)
-      );
+      let bestAssignment = new Map<number, number>();
+      let bestMLTScore = Infinity;
 
-      // lastWeekMLT is declared outside the loop — tracks previous week's assignment
-
-      // Generate all valid MLT→station assignments using recursive search
-      const bestMLTAssignment = new Map<number, number>();
-      let bestScore = Infinity;
-
-      const tryAssign = (stationIdx: number, assignment: Map<number, number>, usedMLTs: Set<number>) => {
-        if (stationIdx >= mltStations.length) {
-          // Score: penalize repeat assignments (total history squared)
-          // + heavy penalty for consecutive same station as last week
+      const tryAssign = (stIdx: number, assignment: Map<number, number>, used: Set<number>) => {
+        if (stIdx >= remainingStations.length) {
           let score = 0;
           for (const [empId, stationId] of assignment) {
-            const hist = weeklyStationHistory.get(`${empId}-${stationId}`) ?? 0;
+            const hist = mltHistory.get(`${empId}-${stationId}`) ?? 0;
             score += hist * hist;
-            // Consecutive penalty: MUST rotate — same station as last week is near-forbidden
-            const lastStation = lastWeekMLT.get(`${empId}-${shiftId}`);
-            if (lastStation === stationId) score += 10000;
-            // Penalty for pulling someone whose #1 is Admin into a real station
-            const empPrefs = empStationMap.get(empId)!;
-            if (adminStation && empPrefs[0] === adminStation.id) score += 500;
-            // Max 1 MLT per station: heavily penalize if locked MLT already covers this station
-            if (stationsWithLockedMLT.has(stationId)) score += 50000;
+            if (lastWeekMLT.get(empId) === stationId) score += 10000;
           }
-          // Also penalize 2+ optimizer MLTs at the same station
-          const stationCounts = new Map<number, number>();
-          for (const [, sid] of assignment) {
-            stationCounts.set(sid, (stationCounts.get(sid) ?? 0) + 1);
-          }
-          for (const [sid, count] of stationCounts) {
-            if (count > 1) score += 50000 * (count - 1);
-          }
-          // Penalize missing MLTs: stations that need an MLT but didn't get one
-          const unfilledCount = mltStations.length - assignment.size;
-          score += unfilledCount * 1000;
+          // Penalize unfilled stations
+          score += (remainingStations.length - assignment.size) * 1000;
+          // Penalize 2+ MLTs at same station
+          const counts = new Map<number, number>();
+          for (const [, sid] of assignment) counts.set(sid, (counts.get(sid) ?? 0) + 1);
+          for (const [, c] of counts) if (c > 1) score += 50000 * (c - 1);
 
-          if (score < bestScore) {
-            bestScore = score;
-            bestMLTAssignment.clear();
-            for (const [k, v] of assignment) bestMLTAssignment.set(k, v);
+          if (score < bestMLTScore) {
+            bestMLTScore = score;
+            bestAssignment = new Map(assignment);
           }
           return;
         }
 
-        const station = mltStations[stationIdx];
-        const candidates = mltPool.filter(
-          id => !usedMLTs.has(id) && empStationMap.get(id)!.includes(station.id)
+        const station = remainingStations[stIdx];
+        let candidates = remainingMLTs.filter(id =>
+          !used.has(id) && empStationMap.get(id)!.includes(station.id)
         );
+        // Shuffle candidates on later passes
+        if (passIdx > 0) candidates = shuffle(candidates);
 
-        // Try each candidate
-        for (const candidate of candidates) {
-          assignment.set(candidate, station.id);
-          usedMLTs.add(candidate);
-          tryAssign(stationIdx + 1, assignment, usedMLTs);
-          assignment.delete(candidate);
-          usedMLTs.delete(candidate);
+        for (const cand of candidates) {
+          assignment.set(cand, station.id);
+          used.add(cand);
+          tryAssign(stIdx + 1, assignment, used);
+          assignment.delete(cand);
+          used.delete(cand);
         }
-
-        // Also try leaving this station without an MLT
-        // (allows optimizer to skip when only Admin-preferred MLTs are available)
-        tryAssign(stationIdx + 1, assignment, usedMLTs);
+        // Try leaving this station without an MLT (if no candidate fits)
+        tryAssign(stIdx + 1, assignment, used);
       };
 
       tryAssign(0, new Map(), new Set());
 
-      // Apply best MLT assignment
-      for (const [empId, stationId] of bestMLTAssignment) {
-        weekAssignment.set(empId, stationId);
-        used.add(empId);
+      for (const [empId, stationId] of bestAssignment) {
+        stationMap.set(empId, stationId);
+        locked.add(empId);
+        mltHistory.set(`${empId}-${stationId}`, (mltHistory.get(`${empId}-${stationId}`) ?? 0) + 1);
       }
+    }
 
-      // ── Station assignment: employee-first with rotation + staffing fix-up ──
-      // Instead of greedy station-by-station (which traps flexible employees),
-      // let each employee pick their best rotation station, then fix shortages.
+    // ── Layer 3: Admin Placement — default to Admin, cover CLS gaps if needed ──
+    function layer3_adminPlacement(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      shiftName: string,
+    ) {
+      if (!adminStation) return;
 
-      const getMinNeededForStation = (station: Station) =>
-        groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-        : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-        : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-        : station.min_staff ?? 1;
-
-      const getMaxForStation = (station: Station) =>
-        (station as any).max_staff ?? 99;
-
-      const isAdminPreferred = (id: number) =>
-        !!(adminStation && empStationMap.get(id)![0] === adminStation.id);
-
-      // Step A: Locked employees (flex=1) — they have no choice, regardless of role
-      for (const id of nonAdminIds) {
-        if (used.has(id) || isAdminPreferred(id)) continue;
-        const realQual = empStationMap.get(id)!.filter(sid => !adminStation || sid !== adminStation.id);
-        if (realQual.length === 1) {
-          weekAssignment.set(id, realQual[0]);
-          used.add(id);
-        }
-      }
-      const nonAdminNonMLT = nonAdminIds.filter(id =>
-        !used.has(id) && empRoleMap.get(id) !== 'mlt' && !isAdminPreferred(id)
+      const adminEmps = pool.filter(a =>
+        !locked.has(a.employee_id) && empRoleMap.get(a.employee_id) === 'admin'
       );
 
-      // Step B: Employee-first rotation assignment for remaining non-admin, non-MLT employees
-      // Sort: least flexible first (they have fewer options, assign them early)
-      let flexEmployees = nonAdminNonMLT.filter(id => !used.has(id));
-      if (passIdx === 0) {
-        // First pass: least flexible first (deterministic)
-        flexEmployees.sort((a, b) => {
-          const aFlex = empStationMap.get(a)!.filter(sid => !adminStation || sid !== adminStation.id).length;
-          const bFlex = empStationMap.get(b)!.filter(sid => !adminStation || sid !== adminStation.id).length;
-          return aFlex - bFlex;
-        });
-      } else {
-        // Subsequent passes: shuffle to explore different orderings
-        flexEmployees = shuffle(flexEmployees);
+      // Default all admins to Admin station
+      for (const a of adminEmps) {
+        stationMap.set(a.employee_id, adminStation.id);
       }
 
-      for (const empId of flexEmployees) {
-        const realQual = empStationMap.get(empId)!.filter(sid => !adminStation || sid !== adminStation.id);
-        // Score each station: lower = better
-        let bestStation = realQual[0];
-        let bestScore = Infinity;
-        for (const sid of realQual) {
+      // Look ahead: which bench stations will have 0 CLS after Layer 4?
+      // Count unlocked CLS available for each station
+      const unlockedCLS = pool.filter(a =>
+        !locked.has(a.employee_id)
+        && empRoleMap.get(a.employee_id) === 'cls'
+        && employees.find(e => e.id === a.employee_id)?.employment_type !== 'per-diem'
+        && !isAdminParked(a.employee_id)
+      ).map(a => a.employee_id);
+      const uniqueCLS = [...new Set(unlockedCLS)];
+
+      for (const station of realStations) {
+        if (station.require_cls !== 1) continue;
+        const minNeeded = getMinStaff(station, shiftName);
+        // How many CLS (non-admin) are qualified and available for this station?
+        const clsForStation = uniqueCLS.filter(id => empStationMap.get(id)!.includes(station.id));
+        // How many MLTs are already placed here?
+        const mltsHere = [...stationMap.entries()].filter(([, sid]) => sid === station.id).length;
+        const slotsForCLS = Math.max(0, minNeeded - mltsHere);
+
+        if (clsForStation.length < slotsForCLS) {
+          // This station will be short on CLS — pull an admin
+          const coverAdmin = adminEmps.find(a =>
+            stationMap.get(a.employee_id) === adminStation.id // currently at Admin
+            && empStationMap.get(a.employee_id)!.includes(station.id)
+          );
+          if (coverAdmin) {
+            stationMap.set(coverAdmin.employee_id, station.id);
+          }
+        }
+      }
+
+      // Lock all admins (whether at Admin or bench)
+      for (const a of adminEmps) locked.add(a.employee_id);
+    }
+
+    // ── Layer 4: CLS Rotation — fill bench with CLS, optimize diversity ──
+    function layer4_clsRotation(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      rotHistory: Map<string, number>,
+      lastWeekStation: Map<number, number>,
+      weekStationThisWeek: Map<number, number>,
+      shiftName: string,
+      passIdx: number,
+    ) {
+      const clsEmps = pool.filter(a =>
+        !locked.has(a.employee_id)
+        && empRoleMap.get(a.employee_id) === 'cls'
+        && employees.find(e => e.id === a.employee_id)?.employment_type !== 'per-diem'
+        && !isAdminParked(a.employee_id)
+      );
+      const uniqueCLSIds = [...new Set(clsEmps.map(a => a.employee_id))];
+
+      // Sort: pass 0 = most-constrained-first, subsequent passes = shuffled
+      let orderedCLS: number[];
+      if (passIdx === 0) {
+        orderedCLS = [...uniqueCLSIds].sort((a, b) => getBenchQuals(a).length - getBenchQuals(b).length);
+      } else {
+        orderedCLS = shuffle(uniqueCLSIds);
+      }
+
+      // Count current station occupancy from stationMap
+      const stationCount = new Map<number, number>();
+      for (const [, sid] of stationMap) {
+        stationCount.set(sid, (stationCount.get(sid) ?? 0) + 1);
+      }
+
+      for (const empId of orderedCLS) {
+        const quals = getBenchQuals(empId);
+        if (quals.length === 0) continue;
+
+        let bestStation = -1;
+        let bestStationScore = Infinity;
+
+        for (const sid of quals) {
+          const station = realStations.find(s => s.id === sid);
+          if (!station) continue;
+
+          const current = stationCount.get(sid) ?? 0;
+          const minNeeded = getMinStaff(station, shiftName);
+          const maxAllowed = station.max_staff ?? 99;
+
+          // Hard block: at max
+          if (current >= maxAllowed) continue;
+
           let score = 0;
-          const stn = realStations.find(s => s.id === sid);
-          if (!stn) continue;
-          const currentStaff = [...weekAssignment.values()].filter(s => s === sid).length;
-          const minNeeded = getMinNeededForStation(stn);
-          const maxAllowed = getMaxForStation(stn);
 
-          // Hard block: never exceed max_staff
-          if (currentStaff >= maxAllowed) {
-            score += 100000; // effectively forbidden
-          } else if (currentStaff < minNeeded) {
-            score -= 200 * (minNeeded - currentStaff); // needs staff (Step C will fix if needed)
-          } else {
-            score += 100; // station is at or above min
-          }
+          // Staffing need: negative = urgently needs people
+          if (current < minNeeded) score -= 200 * (minNeeded - current);
+          else score += 100;
 
-          // Rotation: avoid stations you've been at recently
-          const hist = weeklyStationHistory.get(`${empId}-${sid}`) ?? 0;
-          score += hist * 150; // strong history penalty — each prior week adds cost
-          if (lastWeekStation.get(`${empId}-${shiftId}`) === sid) score += 1500; // consecutive week penalty
+          // Rotation history
+          const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
+          score += hist * 150;
 
-          // Diversity: ensure employees rotate through ALL qualified stations evenly
-          const allHists = realQual.map(s => weeklyStationHistory.get(`${empId}-${s}`) ?? 0);
-          const totalWeeks = allHists.reduce((sum, h) => sum + h, 0);
-          const minHist = Math.min(...allHists);
-          const maxHist = Math.max(...allHists);
+          // Consecutive penalty: same station as last week
+          if (lastWeekStation.get(empId) === sid) score += 1500;
 
-          if (totalWeeks > 0 && hist === 0) {
-            // Never visited — very strong pull that grows over time
-            score -= 800 - Math.min(totalWeeks * 30, 300);
-          }
-          if (totalWeeks >= 2) {
-            // Penalize imbalance: exponential push away from over-visited stations
-            const imbalance = hist - minHist;
-            if (imbalance >= 1) score += imbalance * imbalance * 300;
-          }
-          // Bonus for under-visited: pull toward least-visited station
-          if (totalWeeks >= realQual.length && hist === minHist && maxHist > minHist) {
-            score -= 500;
-          }
-          // Extra: if qualified for 3+ stations and one has 0 visits, strongly pull
-          if (realQual.length >= 3 && hist === 0 && totalWeeks >= 2) {
-            score -= 400;
-          }
+          // Weekly consistency: bonus if same station earlier this week
+          if (weekStationThisWeek.get(empId) === sid) score -= 300;
 
-          // Scarcity: prefer stations with fewer qualified employees (you're more needed)
-          const qualCount = nonAdminIds.filter(id => empStationMap.get(id)!.includes(sid)).length;
-          score -= Math.max(0, 5 - qualCount) * 30; // bonus for scarce stations
+          // Diversity: never-visited stations get a bonus
+          const allHist = quals.map(q => rotHistory.get(`${empId}-${q}`) ?? 0);
+          const minHist = Math.min(...allHist);
+          if (hist === 0) score -= 800;
+          // Imbalance penalty
+          const imbalance = hist - minHist;
+          score += imbalance * imbalance * 300;
 
-          if (score < bestScore) {
-            bestScore = score;
+          // Scarcity: stations with fewer qualified staff get a boost
+          const qualifiedCount = employees.filter(e =>
+            empStationMap.get(e.id)?.includes(sid) && e.role !== 'admin'
+          ).length;
+          score -= (5 - Math.min(qualifiedCount, 5)) * 30;
+
+          if (score < bestStationScore) {
+            bestStationScore = score;
             bestStation = sid;
           }
         }
-        weekAssignment.set(empId, bestStation);
-        used.add(empId);
-      }
 
-      // Step C: Fix understaffed stations — pull the most flexible person from
-      // an overstaffed or fully-staffed station to the understaffed one
-      for (const station of stationsByScarcity) {
-        const minNeeded = getMinNeededForStation(station);
-        const maxAllowed = getMaxForStation(station);
-        let currentStaff = [...weekAssignment.values()].filter(sid => sid === station.id).length;
-        while (currentStaff < minNeeded && currentStaff < maxAllowed) {
-          // Find someone to reassign: prefer most-flexible person at an overstaffed station
-          const candidates = [...weekAssignment.entries()]
-            .filter(([eid, sid]) => {
-              if (sid === station.id) return false; // already here
-              if (!empStationMap.get(eid)!.includes(station.id)) return false; // can't do this station
-              if (isAdminPreferred(eid)) return false;
-              const theirStation = realStations.find(s => s.id === sid);
-              if (!theirStation) return false;
-              const theirMin = getMinNeededForStation(theirStation);
-              const theirCurrent = [...weekAssignment.values()].filter(s => s === sid).length;
-              if (theirCurrent <= theirMin) return false; // would understaff their station
-              return true;
-            })
-            .sort((a, b) => {
-              // Prefer most flexible (they can go anywhere)
-              const aFlex = empStationMap.get(a[0])!.filter(sid => !adminStation || sid !== adminStation.id).length;
-              const bFlex = empStationMap.get(b[0])!.filter(sid => !adminStation || sid !== adminStation.id).length;
-              return bFlex - aFlex; // higher flex first
-            });
-
-          if (candidates.length === 0) {
-            // No one from overstaffed — try pulling admins
-            const admCandidate = adminIds.find(
-              id => !used.has(id) && empStationMap.get(id)!.includes(station.id)
-            );
-            if (admCandidate) {
-              weekAssignment.set(admCandidate, station.id);
-              used.add(admCandidate);
-              currentStaff++;
-            } else {
-              break; // truly no one available
-            }
-            continue;
-          }
-          // Reassign the best candidate to this station
-          weekAssignment.set(candidates[0][0], station.id);
-          currentStaff++;
+        if (bestStation >= 0) {
+          stationMap.set(empId, bestStation);
+          locked.add(empId);
+          stationCount.set(bestStation, (stationCount.get(bestStation) ?? 0) + 1);
+          rotHistory.set(`${empId}-${bestStation}`, (rotHistory.get(`${empId}-${bestStation}`) ?? 0) + 1);
+          weekStationThisWeek.set(empId, bestStation);
         }
       }
 
-      // MLT rebalance: if a station that allows MLTs has none, swap from another
-      for (const station of stationsByScarcity) {
-        if (station.require_cls !== 1) continue;
-        const assignedHere = [...weekAssignment.entries()].filter(([, sid]) => sid === station.id);
-        const hasMLT = assignedHere.some(([eid]) => empRoleMap.get(eid) === 'mlt');
-        if (hasMLT || assignedHere.length === 0) continue;
+      // Swap improvement pass: try swapping pairs to improve rotation
+      for (const empA of orderedCLS) {
+        if (!stationMap.has(empA)) continue;
+        const stA = stationMap.get(empA)!;
+        const histA = rotHistory.get(`${empA}-${stA}`) ?? 0;
+        const consecA = lastWeekStation.get(empA) === stA ? 1 : 0;
+        const scoreA = histA * histA + consecA * 10;
 
-        for (const otherStation of stationsByScarcity) {
-          if (otherStation.id === station.id) continue;
-          const otherAssigned = [...weekAssignment.entries()].filter(([, sid]) => sid === otherStation.id);
-          const otherMLTs = otherAssigned.filter(([eid]) => empRoleMap.get(eid) === 'mlt');
-          if (otherMLTs.length === 0) continue;
+        for (const empB of orderedCLS) {
+          if (empA >= empB || !stationMap.has(empB)) continue;
+          const stB = stationMap.get(empB)!;
+          if (stA === stB) continue;
 
-          for (const [mltId] of otherMLTs) {
-            if (!empStationMap.get(mltId)!.includes(station.id)) continue;
-            // Find a non-MLT here that can go to the other station
-            const swapCandidate = assignedHere.find(([eid]) =>
-              empRoleMap.get(eid) !== 'mlt' && empStationMap.get(eid)!.includes(otherStation.id)
-            );
-            if (!swapCandidate) continue;
-            weekAssignment.set(mltId, station.id);
-            weekAssignment.set(swapCandidate[0], otherStation.id);
+          // Check both can work at each other's station
+          if (!getBenchQuals(empA).includes(stB)) continue;
+          if (!getBenchQuals(empB).includes(stA)) continue;
+
+          const histB = rotHistory.get(`${empB}-${stB}`) ?? 0;
+          const consecB = lastWeekStation.get(empB) === stB ? 1 : 0;
+          const scoreBefore = histA * histA + consecA * 10 + histB * histB + consecB * 10;
+
+          const newHistA = rotHistory.get(`${empA}-${stB}`) ?? 0;
+          const newConsecA = lastWeekStation.get(empA) === stB ? 1 : 0;
+          const newHistB = rotHistory.get(`${empB}-${stA}`) ?? 0;
+          const newConsecB = lastWeekStation.get(empB) === stA ? 1 : 0;
+          const scoreAfter = newHistA * newHistA + newConsecA * 10 + newHistB * newHistB + newConsecB * 10;
+
+          if (scoreAfter < scoreBefore) {
+            // Undo old history
+            rotHistory.set(`${empA}-${stA}`, Math.max(0, (rotHistory.get(`${empA}-${stA}`) ?? 1) - 1));
+            rotHistory.set(`${empB}-${stB}`, Math.max(0, (rotHistory.get(`${empB}-${stB}`) ?? 1) - 1));
+            // Apply swap
+            stationMap.set(empA, stB);
+            stationMap.set(empB, stA);
+            rotHistory.set(`${empA}-${stB}`, (rotHistory.get(`${empA}-${stB}`) ?? 0) + 1);
+            rotHistory.set(`${empB}-${stA}`, (rotHistory.get(`${empB}-${stA}`) ?? 0) + 1);
+            weekStationThisWeek.set(empA, stB);
+            weekStationThisWeek.set(empB, stA);
+            break; // one swap per employee
+          }
+        }
+      }
+    }
+
+// ── Layer 5: Admin-Parked Fill (e.g., Shayna) — only if bench stations need help ──
+    // Re-optimizes ALL MLT placements to give admin-parked their preferred station
+    function layer5_shaynaFill(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      shiftName: string,
+    ) {
+      const adminParked = pool.filter(a =>
+        !locked.has(a.employee_id) && isAdminParked(a.employee_id)
+      );
+      const uniqueAP = [...new Map(adminParked.map(a => [a.employee_id, a])).values()];
+
+      for (const ap of uniqueAP) {
+        const benchQuals = getBenchQuals(ap.employee_id);
+        if (benchQuals.length === 0) continue;
+        const apRole = empRoleMap.get(ap.employee_id);
+        if (apRole !== 'mlt') continue; // only handle MLT admin-parked here
+
+        // Check if any bench station is understaffed — otherwise no reason to pull from Admin
+        const anyUnderstaffed = realStations.some(s => {
+          const current = [...stationMap.values()].filter(v => v === s.id).length;
+          return current < getMinStaff(s, shiftName);
+        });
+        if (!anyUnderstaffed) continue;
+
+        // Re-optimize: collect all MLTs currently on bench + this admin-parked person
+        const mltStations = realStations.filter(s => s.require_cls === 1);
+        const currentMLTs: { empId: number; stationId: number }[] = [];
+        for (const [eid, sid] of stationMap) {
+          if (empRoleMap.get(eid) === 'mlt' && mltStations.some(s => s.id === sid)) {
+            currentMLTs.push({ empId: eid, stationId: sid });
+          }
+        }
+
+        // Build expanded pool: existing bench MLTs + admin-parked
+        const mltPool = [...new Set([...currentMLTs.map(m => m.empId), ap.employee_id])];
+        const prefStation = benchQuals[0]; // admin-parked's #1 preference
+
+        // Brute-force: try all valid assignments of mltPool to mltStations
+        let bestAssignment = new Map<number, number>();
+        let bestScore = Infinity;
+
+        const tryAssign = (stIdx: number, assignment: Map<number, number>, used: Set<number>) => {
+          if (stIdx >= mltStations.length) {
+            let score = 0;
+            // Penalize unfilled stations that are understaffed
+            for (const st of mltStations) {
+              const hasMLT = [...assignment.values()].includes(st.id);
+              if (!hasMLT) {
+                const current = [...stationMap.values()].filter(v => v === st.id).length;
+                const minNeeded = getMinStaff(st, shiftName);
+                if (current < minNeeded) score += 10000; // understaffed station without MLT
+              }
+            }
+            // Strong bonus for admin-parked at their preferred station
+            if (assignment.get(ap.employee_id) === prefStation) {
+              score -= 5000;
+            }
+            // Penalize 2+ MLTs at same station
+            const counts = new Map<number, number>();
+            for (const [, sid] of assignment) counts.set(sid, (counts.get(sid) ?? 0) + 1);
+            for (const [, c] of counts) if (c > 1) score += 50000 * (c - 1);
+
+            if (score < bestScore) {
+              bestScore = score;
+              bestAssignment = new Map(assignment);
+            }
+            return;
+          }
+
+          const station = mltStations[stIdx];
+          const candidates = mltPool.filter(id =>
+            !used.has(id) && (empStationMap.get(id) ?? []).includes(station.id)
+          );
+
+          for (const cand of candidates) {
+            assignment.set(cand, station.id);
+            used.add(cand);
+            tryAssign(stIdx + 1, assignment, used);
+            assignment.delete(cand);
+            used.delete(cand);
+          }
+          // Try leaving this station without an MLT from this pool
+          tryAssign(stIdx + 1, assignment, used);
+        };
+
+        tryAssign(0, new Map(), new Set());
+
+        if (bestAssignment.size === 0) continue; // no valid assignment found
+
+        // Apply: update stationMap with new MLT assignments
+        // Remove old MLT assignments from bench stations
+        for (const m of currentMLTs) {
+          // Only remove if this MLT is being reassigned
+          if (bestAssignment.has(m.empId)) {
+            stationMap.delete(m.empId);
+          }
+        }
+        // Apply new assignments
+        for (const [empId, stationId] of bestAssignment) {
+          stationMap.set(empId, stationId);
+          locked.add(empId);
+        }
+      }
+    }
+
+    // ── Layer 6: Per-Diem Fill — fill remaining gaps ──
+    function layer6_perDiemFill(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      shiftName: string,
+    ) {
+      const perDiems = pool.filter(a => {
+        if (locked.has(a.employee_id)) return false;
+        const emp = employees.find(e => e.id === a.employee_id);
+        return emp?.employment_type === 'per-diem';
+      });
+      const uniquePD = [...new Map(perDiems.map(a => [a.employee_id, a])).values()];
+
+      // CLS per-diems: assign to their station if it needs them
+      for (const pd of uniquePD) {
+        const role = empRoleMap.get(pd.employee_id);
+        if (role !== 'cls') continue;
+
+        const quals = getBenchQuals(pd.employee_id);
+        for (const sid of quals) {
+          const station = realStations.find(s => s.id === sid);
+          if (!station) continue;
+
+          const currentStaff = [...stationMap.values()].filter(s => s === sid).length;
+          const minNeeded = getMinStaff(station, shiftName);
+          const maxAllowed = station.max_staff ?? 99;
+
+          // Place if understaffed or if station needs CLS coverage
+          if (currentStaff < minNeeded || (
+            station.require_cls === 1 && currentStaff < maxAllowed &&
+            ![...stationMap.entries()].some(([eid, s]) => s === sid && isCLSRole(eid, empRoleMap))
+          )) {
+            stationMap.set(pd.employee_id, sid);
+            locked.add(pd.employee_id);
             break;
           }
-          const recheckMLT = [...weekAssignment.entries()].filter(([, sid]) => sid === station.id)
-            .some(([eid]) => empRoleMap.get(eid) === 'mlt');
-          if (recheckMLT) break;
         }
       }
 
-      // Assign remaining non-admins to their preferred station (respecting max limits)
-      for (const id of nonAdminIds) {
-        if (used.has(id)) continue;
-        const qualStations = empStationMap.get(id)!;
-        // If their #1 is Admin, let them have it; otherwise prefer non-Admin with room
-        if (adminStation && qualStations[0] === adminStation.id) {
-          weekAssignment.set(id, adminStation.id);
-        } else {
-          const isMLT = empRoleMap.get(id) === 'mlt';
-          // Pick a non-Admin station that's under max, preferring understaffed ones
-          const nonAdminStations = qualStations
-            .filter(sid => !adminStation || sid !== adminStation.id)
-            .map(sid => {
-              const stn = realStations.find(s => s.id === sid);
-              const current = [...weekAssignment.values()].filter(s => s === sid).length;
-              const max = stn ? getMaxForStation(stn) : 99;
-              const min = stn ? getMinNeededForStation(stn) : 1;
-              // Check if station already has an MLT assigned
-              const hasMLT = [...weekAssignment.entries()]
-                .some(([eid, s]) => s === sid && empRoleMap.get(eid) === 'mlt');
-              return { sid, current, max, min, hasMLT };
-            })
-            .filter(s => s.current < s.max) // only consider stations with room
-            .sort((a, b) => {
-              // If this employee is an MLT, strongly prefer stations without an MLT (max 1 per station)
-              if (isMLT) {
-                if (a.hasMLT !== b.hasMLT) return a.hasMLT ? 1 : -1;
-              }
-              return (a.current - a.min) - (b.current - b.min); // most understaffed first
-            });
-          if (nonAdminStations.length > 0) {
-            weekAssignment.set(id, nonAdminStations[0].sid);
-          } else {
-            // All real stations at max — MLTs should never go to Admin, pick least-full real station
-            if (isMLT) {
-              const realOptions = qualStations
-                .filter(sid => !adminStation || sid !== adminStation.id)
-                .map(sid => ({ sid, count: [...weekAssignment.values()].filter(s => s === sid).length }))
-                .sort((a, b) => a.count - b.count);
-              weekAssignment.set(id, realOptions.length > 0 ? realOptions[0].sid : qualStations[0]);
-            } else {
-              weekAssignment.set(id, adminStation?.id ?? qualStations[0]);
+      // MLT per-diems: fill MLT gaps at stations that need them
+      for (const pd of uniquePD) {
+        if (locked.has(pd.employee_id)) continue;
+        const role = empRoleMap.get(pd.employee_id);
+        if (role !== 'mlt') continue;
+
+        const quals = getBenchQuals(pd.employee_id);
+        for (const sid of quals) {
+          const station = realStations.find(s => s.id === sid);
+          if (!station || station.require_cls !== 1) continue;
+
+          const currentStaff = [...stationMap.values()].filter(s => s === sid).length;
+          const minNeeded = getMinStaff(station, shiftName);
+          const mltsHere = [...stationMap.entries()].filter(([eid, s]) =>
+            s === sid && empRoleMap.get(eid) === 'mlt'
+          ).length;
+
+          // Only place if station needs staff AND has no MLT yet
+          if (currentStaff < minNeeded && mltsHere === 0) {
+            stationMap.set(pd.employee_id, sid);
+            locked.add(pd.employee_id);
+            break;
+          }
+        }
+      }
+    }
+
+    // ── Layer 7: Overflow — everyone else goes to Admin ──
+    function layer7_overflow(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+    ) {
+      if (!adminStation) return;
+      for (const a of pool) {
+        if (!stationMap.has(a.employee_id)) {
+          stationMap.set(a.employee_id, adminStation.id);
+        }
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // MULTI-PASS OPTIMIZER
+    // ══════════════════════════════════════════════════════════════
+
+    let bestPassWarnings: string[] = [];
+
+    for (let passIdx = 0; passIdx < NUM_STATION_PASSES; passIdx++) {
+      // Reset all station assignments for this pass
+      for (const a of result) a.station_id = null as any;
+
+      // Per-pass rotation tracking (starts from seed)
+      const rotHistory = new Map(seedHistory);
+      const mltHistory = new Map(seedHistory);
+      const lastWeekStation = new Map(seedLastWeekStation);
+      const lastWeekMLT = new Map<number, number>();
+      for (const [empId, v] of seedLastWeekStation) {
+        if (empRoleMap.get(empId) === 'mlt') lastWeekMLT.set(empId, v);
+      }
+      const weekStationThisWeek = new Map<number, number>();
+      const bbRotation = new Map<number, number>();
+
+      // Process each day+shift group chronologically
+      let currentWeek = '';
+
+      for (const groupKey of sortedGroupKeys) {
+        const group = shiftDateGroups.get(groupKey)!;
+        const date = group[0].date;
+        const shiftIdNum = group[0].shift_id;
+        const shiftName = shifts.find(s => s.id === shiftIdNum)?.name?.toLowerCase() ?? '';
+
+        // Track week transitions for rotation tracking
+        const week = getWeekStart(date);
+        if (week !== currentWeek) {
+          // New week — update lastWeekStation from this week's assignments
+          if (currentWeek !== '') {
+            for (const [empId, sid] of weekStationThisWeek) {
+              lastWeekStation.set(empId, sid);
+              if (empRoleMap.get(empId) === 'mlt') lastWeekMLT.set(empId, sid);
             }
           }
+          weekStationThisWeek.clear();
+          currentWeek = week;
         }
-        used.add(id);
-      }
 
-      // Admins default to Admin station for the week
-      if (adminStation) {
-        for (const id of adminIds) {
-          if (!used.has(id)) {
-            weekAssignment.set(id, adminStation.id);
-            used.add(id);
-          }
-        }
-      }
+        // Build the pool: all employees working this day+shift
+        const pool = group;
+        const locked = new Set<number>();
+        const stationMap = new Map<number, number>();
 
-      // ── Rotation enforcement swap pass ──
-      // Two goals: (1) no same-station-as-last-week, (2) spread employees
-      // across ALL their qualified stations, not just alternating between two.
-      //
-      // Score each employee's assignment: higher = worse rotation.
-      // Try swapping the worst-scored employees with better partners.
-      const canSwap = (eId: number, eSid: number, oId: number, oSid: number) => {
-        if (!empStationMap.get(eId)!.includes(oSid)) return false;
-        if (!empStationMap.get(oId)!.includes(eSid)) return false;
-        // Don't swap into a station that would exceed max (net effect is neutral for swaps, but check anyway)
-        const eStn = realStations.find(s => s.id === eSid);
-        const oStn = realStations.find(s => s.id === oSid);
-        if (eStn && [...weekAssignment.values()].filter(s => s === eSid).length >= getMaxForStation(eStn) + 1) return false;
-        if (oStn && [...weekAssignment.values()].filter(s => s === oSid).length >= getMaxForStation(oStn) + 1) return false;
-        // Don't create consecutive assignment for the other person
-        if (lastWeekStation.get(`${oId}-${shiftId}`) === eSid) return false;
-        // Don't swap into consecutive for the employee either
-        if (lastWeekStation.get(`${eId}-${shiftId}`) === oSid) return false;
-        // Preserve MLT coverage
-        const eRole = empRoleMap.get(eId)!;
-        const oRole = empRoleMap.get(oId)!;
-        if (eStn?.require_cls === 1 && eRole === 'mlt') {
-          const otherMLTs = [...weekAssignment.entries()].filter(
-            ([id, sid]) => sid === eSid && id !== eId && empRoleMap.get(id) === 'mlt'
-          );
-          if (otherMLTs.length === 0 && oRole !== 'mlt') return false;
-        }
-        if (oStn?.require_cls === 1 && oRole === 'mlt') {
-          const otherMLTs = [...weekAssignment.entries()].filter(
-            ([id, sid]) => sid === oSid && id !== oId && empRoleMap.get(id) === 'mlt'
-          );
-          if (otherMLTs.length === 0 && eRole !== 'mlt') return false;
-        }
-        return true;
-      };
+        // Run the 7 layers in order
+        layer1_bloodBank(pool, locked, stationMap, bbRotation, passIdx);
+        layer2_mltPlacement(pool, locked, stationMap, mltHistory, lastWeekMLT, passIdx);
+        layer3_adminPlacement(pool, locked, stationMap, shiftName);
+        layer4_clsRotation(pool, locked, stationMap, rotHistory, lastWeekStation, weekStationThisWeek, shiftName, passIdx);
+        layer5_shaynaFill(pool, locked, stationMap, shiftName);
+        layer6_perDiemFill(pool, locked, stationMap, shiftName);
+        layer7_overflow(pool, locked, stationMap);
 
-      // Rotation score: how "stuck" is this employee at their current station?
-      const rotationScore = (empId: number, stationId: number) => {
-        const realQual = empStationMap.get(empId)!.filter(sid => !adminStation || sid !== adminStation.id);
-        if (realQual.length <= 1) return -1; // locked, ignore
-        let score = 0;
-        // Consecutive: same as last week
-        if (lastWeekStation.get(`${empId}-${shiftId}`) === stationId) score += 100;
-        // History imbalance: how many times at this station vs their least-visited station
-        const thisHist = weeklyStationHistory.get(`${empId}-${stationId}`) ?? 0;
-        const minHist = Math.min(...realQual.map(sid => weeklyStationHistory.get(`${empId}-${sid}`) ?? 0));
-        score += (thisHist - minHist) * 10;
-        return score;
-      };
-
-      // Build list of swap candidates sorted by worst rotation score first
-      const swapCandidates = [...weekAssignment.entries()]
-        .filter(([, sid]) => !adminStation || sid !== adminStation.id)
-        .map(([empId, sid]) => ({ empId, sid, score: rotationScore(empId, sid) }))
-        .filter(c => c.score > 0)
-        .sort((a, b) => b.score - a.score);
-
-      for (const { empId, sid: stationId } of swapCandidates) {
-        // Check if still at this station (a prior swap may have moved them)
-        if (weekAssignment.get(empId) !== stationId) continue;
-
-        // Find the best swap partner
-        let bestSwap: { otherId: number; otherSid: number; improvement: number } | null = null;
-        for (const [otherId, otherSid] of weekAssignment) {
-          if (otherId === empId || otherSid === stationId) continue;
-          if (adminStation && otherSid === adminStation.id) continue;
-          if (!canSwap(empId, stationId, otherId, otherSid)) continue;
-          // Calculate improvement: does the swap improve TOTAL rotation score?
-          const curScore = rotationScore(empId, stationId) + rotationScore(otherId, otherSid);
-          const newEmpScore = rotationScore(empId, otherSid);
-          const newOtherScore = rotationScore(otherId, stationId);
-          // Only use history portion for new scores (consecutive check uses current lastWeek,
-          // but after swap the new stations won't be consecutive if canSwap passed)
-          const improvement = curScore - (Math.max(newEmpScore, 0) + Math.max(newOtherScore, 0));
-          if (improvement > 0 && (!bestSwap || improvement > bestSwap.improvement)) {
-            bestSwap = { otherId, otherSid, improvement };
-          }
-        }
-        if (bestSwap) {
-          weekAssignment.set(empId, bestSwap.otherSid);
-          weekAssignment.set(bestSwap.otherId, stationId);
+        // Apply station assignments to the result assignments
+        for (const a of group) {
+          a.station_id = stationMap.get(a.employee_id) ?? null;
         }
       }
 
-      // Update rotation history and last-week tracking (ALL employees)
-      for (const [empId, stationId] of weekAssignment) {
-        const hk = `${empId}-${stationId}`;
-        weeklyStationHistory.set(hk, (weeklyStationHistory.get(hk) ?? 0) + 1);
-        lastWeekMLT.set(`${empId}-${shiftId}`, stationId);
-        lastWeekStation.set(`${empId}-${shiftId}`, stationId);
-      }
+      // ── Generate warnings for this pass ──
+      const passWarnings: string[] = [];
 
-      // Apply weekly assignment to each day's assignments
-      for (const dailyGroup of dailyGroups) {
-        for (const a of dailyGroup) {
-          const assignedStation = weekAssignment.get(a.employee_id);
-          if (assignedStation !== undefined) {
-            a.station_id = assignedStation;
-          }
-        }
+      for (const [, group] of shiftDateGroups) {
+        const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
+        const shiftLabel = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
+        const date = group[0].date;
 
-        // Daily fix-up: after weekly assignment is applied, fix staffing and MLT gaps
-        // using Admin-parked employees (admins and Admin-preferred like Shayna)
-        const getMinNeeded = (station: any) =>
-          groupShiftName === 'am' ? station.min_staff_am ?? station.min_staff ?? 1
-          : groupShiftName === 'pm' ? station.min_staff_pm ?? station.min_staff ?? 1
-          : groupShiftName === 'night' ? station.min_staff_night ?? station.min_staff ?? 1
-          : station.min_staff ?? 1;
-        const getMaxNeeded = (station: any) => station.max_staff ?? 99;
-
-        // Step 1: Pull admins from Admin to understaffed real stations
         for (const station of realStations) {
-          const minNeeded = getMinNeeded(station);
-          const maxAllowed = getMaxNeeded(station);
-          let currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
-          while (currentStaff < minNeeded && currentStaff < maxAllowed) {
-            const sup = dailyGroup.find(a =>
-              adminStation && a.station_id === adminStation.id &&
-              empRoleMap.get(a.employee_id) === 'admin' &&
-              empStationMap.get(a.employee_id)!.includes(station.id)
-            );
-            if (!sup) break;
-            sup.station_id = station.id;
-            currentStaff++;
-          }
-        }
-
-        // Step 1b: Before pulling admin-parked employees, try moving bench MLTs
-        // from overstaffed stations to understaffed ones. This avoids pulling
-        // admin-parked employees (like Shayna) when regular MLTs can cover.
-        for (const station of realStations) {
-          const minNeeded = getMinNeeded(station);
-          const maxAllowed = getMaxNeeded(station);
-          let currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
-          while (currentStaff < minNeeded && currentStaff < maxAllowed) {
-            // Find an MLT at an overstaffed station who can work here
-            const donor = dailyGroup.find(a => {
-              if (a.station_id === station.id) return false;
-              if (!empStationMap.get(a.employee_id)!.includes(station.id)) return false;
-              if (empRoleMap.get(a.employee_id) === 'admin') return false;
-              if (adminStation && a.station_id === adminStation.id) return false; // handled later
-              const theirStation = realStations.find(s => s.id === a.station_id);
-              if (!theirStation) return false;
-              const theirMin = getMinNeeded(theirStation);
-              const theirCurrent = dailyGroup.filter(x => x.station_id === a.station_id).length;
-              return theirCurrent > theirMin; // only from overstaffed
-            });
-            if (!donor) break;
-            donor.station_id = station.id;
-            currentStaff++;
-          }
-        }
-
-        // Step 2: Pull Admin-parked non-admins (like Shayna) for staffing gaps
-        // These employees are last-resort fillers — only pull them when no other
-        // MLT at a bench station can cover the gap. Prefer their specialty station.
-        // Sort stations so we fill the admin-parked employee's preferred bench station first.
-        const adminParkedCandidates = adminStation ? dailyGroup.filter(a =>
-          a.station_id === adminStation.id &&
-          empRoleMap.get(a.employee_id) !== 'admin'
-        ) : [];
-        if (adminParkedCandidates.length > 0) {
-          // Sort stations: prefer the candidate's higher-priority qualified stations
-          const stationsNeedingStaff = realStations
-            .filter(station => {
-              const minNeeded = getMinNeeded(station);
-              const currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
-              return currentStaff < minNeeded;
-            })
-            .sort((a, b) => {
-              // For each station, find the best-priority admin-parked candidate
-              const aPrio = Math.min(...adminParkedCandidates
-                .filter(c => empStationMap.get(c.employee_id)!.includes(a.id))
-                .map(c => {
-                  const quals = empStationMap.get(c.employee_id)!.filter(sid => sid !== adminStation!.id);
-                  return quals.indexOf(a.id);
-                })
-                .filter(i => i >= 0), 99);
-              const bPrio = Math.min(...adminParkedCandidates
-                .filter(c => empStationMap.get(c.employee_id)!.includes(b.id))
-                .map(c => {
-                  const quals = empStationMap.get(c.employee_id)!.filter(sid => sid !== adminStation!.id);
-                  return quals.indexOf(b.id);
-                })
-                .filter(i => i >= 0), 99);
-              return aPrio - bPrio; // lower index = higher priority station for them
-            });
-
-          for (const station of stationsNeedingStaff) {
-            const minNeeded = getMinNeeded(station);
-            const maxAllowed = getMaxNeeded(station);
-            let currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
-            while (currentStaff < minNeeded && currentStaff < maxAllowed) {
-              // Pick the candidate whose highest-priority bench station matches this one
-              const candidate = adminParkedCandidates.find(a =>
-                a.station_id === adminStation!.id &&
-                empStationMap.get(a.employee_id)!.includes(station.id)
-              );
-              if (!candidate) break;
-              candidate.station_id = station.id;
-              currentStaff++;
-            }
-          }
-        }
-
-        // Step 2b: Swap admin-parked employees to their preferred bench station.
-        // If Shayna ended up at Micro but prefers Hema, and there's an MLT at Hema
-        // who can also do Micro, swap them so Shayna goes to her preferred station.
-        for (const ap of adminParkedCandidates) {
-          if (adminStation && ap.station_id === adminStation.id) continue; // still at Admin, skip
-          const empId = ap.employee_id;
-          const currentSid = ap.station_id!;
-          if (!currentSid) continue;
-          const benchQuals = empStationMap.get(empId)!.filter(sid => !adminStation || sid !== adminStation.id);
-          const preferredSid = benchQuals[0]; // their #1 bench station
-          if (!preferredSid || preferredSid === currentSid) continue; // already at preferred
-
-          // Find someone at the preferred station who can cover where Shayna currently is
-          const swapTarget = dailyGroup.find(a => {
-            if (a.station_id !== preferredSid) return false;
-            if (a.employee_id === empId) return false;
-            if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
-            // Don't swap admin-role employees off their assigned station
-            if (empRoleMap.get(a.employee_id) === 'admin') return false;
-            return true;
-          });
-          if (swapTarget) {
-            ap.station_id = preferredSid;
-            swapTarget.station_id = currentSid;
-          }
-        }
-
-        // Step 3: MLT rebalance — if a station needs an MLT but doesn't have one,
-        // try to pull an MLT from Admin or swap MLTs between stations
-        for (const station of realStations) {
-          if (station.require_cls !== 1) continue;
-          const assignees = dailyGroup.filter(a => a.station_id === station.id);
-          if (assignees.length === 0) continue;
-          const hasMLT = assignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
-          if (hasMLT) continue;
-
-          // Try pulling an MLT from Admin (but NOT Admin-preferred employees —
-          // they only get pulled for actual understaffing in Step 2, not MLT preference)
-          if (adminStation) {
-            const stationMax = getMaxNeeded(station);
-            const stationCurrent = dailyGroup.filter(a => a.station_id === station.id).length;
-            if (stationCurrent < stationMax) {
-              const mltFromAdmin = dailyGroup.find(a =>
-                a.station_id === adminStation.id &&
-                empRoleMap.get(a.employee_id) === 'mlt' &&
-                empStationMap.get(a.employee_id)!.includes(station.id) &&
-                empStationMap.get(a.employee_id)![0] !== adminStation.id // skip Admin-preferred
-              );
-              if (mltFromAdmin) {
-                mltFromAdmin.station_id = station.id;
-                continue;
-              }
-            }
-          }
-
-          // Try swapping: find an MLT at another station who can work here,
-          // and a non-MLT here who can work at the other station
-          for (const otherStation of realStations) {
-            if (otherStation.id === station.id) continue;
-            const otherAssignees = dailyGroup.filter(a => a.station_id === otherStation.id);
-            const otherMLTs = otherAssignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt');
-            // Only swap if other station has >1 MLT, or the station doesn't require MLTs
-            const otherNeedsMLT = otherStation.require_cls === 1;
-            // Skip if other station needs its only MLT AND no backup MLT from Admin
-            // (include Admin-preferred MLTs as valid backup — they can fill in)
-            if (otherNeedsMLT && otherMLTs.length <= 1) {
-              const adminMLTBackup = adminStation && dailyGroup.some(a =>
-                a.station_id === adminStation.id &&
-                empRoleMap.get(a.employee_id) === 'mlt' &&
-                empStationMap.get(a.employee_id)!.includes(otherStation.id)
-              );
-              if (!adminMLTBackup) continue;
-            }
-
-            for (const mlt of otherMLTs) {
-              if (!empStationMap.get(mlt.employee_id)!.includes(station.id)) continue;
-              // Find a non-MLT at this station that can go to the other station
-              const swapCandidate = assignees.find(a =>
-                empRoleMap.get(a.employee_id) !== 'mlt' &&
-                empStationMap.get(a.employee_id)!.includes(otherStation.id)
-              );
-              if (swapCandidate) {
-                mlt.station_id = station.id;
-                swapCandidate.station_id = otherStation.id;
-                // If we depleted the other station's MLT, pull backup from Admin
-                const otherStillHasMLT = dailyGroup.filter(a => a.station_id === otherStation.id)
-                  .some(a => empRoleMap.get(a.employee_id) === 'mlt');
-                if (!otherStillHasMLT && otherStation.require_cls === 1 && adminStation) {
-                  const backup = dailyGroup.find(a =>
-                    a.station_id === adminStation.id &&
-                    empRoleMap.get(a.employee_id) === 'mlt' &&
-                    empStationMap.get(a.employee_id)!.includes(otherStation.id)
-                  );
-                  if (backup) backup.station_id = otherStation.id;
-                }
-                break;
-              }
-            }
-            if (dailyGroup.filter(a => a.station_id === station.id).some(a => empRoleMap.get(a.employee_id) === 'mlt')) break;
-          }
-
-          // Last resort: get an Admin-parked MLT (e.g. Shayna) into this station
-          if (adminStation) {
-            const stillNoMLT = !dailyGroup.filter(a => a.station_id === station.id)
-              .some(a => empRoleMap.get(a.employee_id) === 'mlt');
-            if (stillNoMLT) {
-              const adminMLTs = dailyGroup.filter(a =>
-                a.station_id === adminStation.id &&
-                empRoleMap.get(a.employee_id) === 'mlt' &&
-                empStationMap.get(a.employee_id)!.includes(station.id)
-              );
-              if (adminMLTs.length > 0) {
-                const stationCount = dailyGroup.filter(a => a.station_id === station.id).length;
-                const stationMax = (station as any).max_staff ?? 99;
-
-                if (stationCount < stationMax) {
-                  // Room available — just pull the MLT in
-                  adminMLTs[0].station_id = station.id;
-                } else {
-                  // Station is at max — relocate a non-MLT to make room
-                  const nonMLTsHere = dailyGroup.filter(a =>
-                    a.station_id === station.id && empRoleMap.get(a.employee_id) !== 'mlt'
-                  );
-                  let relocated = false;
-                  for (const candidate of nonMLTsHere) {
-                    // Find any station with room that this person can work at
-                    const destStations = empStationMap.get(candidate.employee_id)!
-                      .filter(sid => sid !== station.id)
-                      .map(sid => {
-                        const stn = [...realStations, adminStation].find(s => s && s.id === sid);
-                        if (!stn) return null;
-                        const cur = dailyGroup.filter(a => a.station_id === sid).length;
-                        const max = (stn as any).max_staff ?? 99;
-                        const min = stn.id === adminStation?.id ? 0 :
-                          (groupShiftName === 'am' ? (stn as any).min_staff_am ?? stn.min_staff ?? 1
-                          : stn.min_staff ?? 1);
-                        return { sid, cur, max, min };
-                      })
-                      .filter((s): s is NonNullable<typeof s> => s !== null && s.cur < s.max)
-                      .sort((a, b) => (a.cur - a.min) - (b.cur - b.min)); // prefer understaffed
-
-                    if (destStations.length > 0) {
-                      candidate.station_id = destStations[0].sid;
-                      adminMLTs[0].station_id = station.id;
-                      relocated = true;
-                      break;
-                    }
-                  }
-                  // After pulling admin-parked MLT, try swapping to their preferred bench station
-                  if (relocated || stationCount < stationMax) {
-                    const pulledMLT = adminMLTs[0];
-                    const pulledBenchQuals = empStationMap.get(pulledMLT.employee_id)!
-                      .filter(sid => !adminStation || sid !== adminStation.id);
-                    const pulledPreferred = pulledBenchQuals[0];
-                    if (pulledPreferred && pulledMLT.station_id !== pulledPreferred) {
-                      // Find someone at their preferred station who can cover where they ended up
-                      const swapForPreferred = dailyGroup.find(a => {
-                        if (a.station_id !== pulledPreferred) return false;
-                        if (a.employee_id === pulledMLT.employee_id) return false;
-                        if (!empStationMap.get(a.employee_id)!.includes(pulledMLT.station_id!)) return false;
-                        if (empRoleMap.get(a.employee_id) === 'admin') return false;
-                        return true;
-                      });
-                      if (swapForPreferred) {
-                        const tempSid = pulledMLT.station_id;
-                        pulledMLT.station_id = pulledPreferred;
-                        swapForPreferred.station_id = tempSid;
-                      }
-                    }
-                  }
-                  // Fallback: try swapping with someone who can go to Admin
-                  if (!relocated) {
-                    for (const adminMLT of adminMLTs) {
-                      const swapOut = dailyGroup.find(a =>
-                        a.station_id === station.id &&
-                        empRoleMap.get(a.employee_id) !== 'mlt' &&
-                        empStationMap.get(a.employee_id)!.includes(adminStation.id)
-                      );
-                      if (swapOut) {
-                        adminMLT.station_id = station.id;
-                        swapOut.station_id = adminStation.id;
-                        break;
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // Step 4: MLT redistribution — if an Admin-parked MLT can replace another MLT
-      // at a station, freeing that MLT for a station that needs MLT coverage.
-      // Also: on thin days, pull Admin-preferred MLTs to real stations to maximize coverage.
-      for (const dailyGroup of dailyGroups) {
-        const adminParkedMLTs = adminStation ? dailyGroup.filter(a =>
-          a.station_id === adminStation.id && empRoleMap.get(a.employee_id) === 'mlt'
-        ) : [];
-
-        // Find stations that need an MLT but don't have one
-        const stationsNeedingMLT = realStations.filter(station => {
-          if (station.require_cls !== 1) return false;
-          const assignees = dailyGroup.filter(a => a.station_id === station.id);
-          if (assignees.length === 0) return false;
-          return !assignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
-        });
-
-        // Chain swaps: move an MLT from station A to needy station, Admin MLT backfills A
-        if (adminParkedMLTs.length > 0) for (const needyStation of stationsNeedingMLT) {
-          for (const otherStation of realStations) {
-            if (otherStation.id === needyStation.id) continue;
-            const otherMLTs = dailyGroup.filter(a =>
-              a.station_id === otherStation.id && empRoleMap.get(a.employee_id) === 'mlt'
-            );
-            for (const mlt of otherMLTs) {
-              if (!empStationMap.get(mlt.employee_id)!.includes(needyStation.id)) continue;
-              const backfillMLT = adminParkedMLTs.find(a =>
-                empStationMap.get(a.employee_id)!.includes(otherStation.id)
-              );
-              if (!backfillMLT) continue;
-              const needyCount = dailyGroup.filter(a => a.station_id === needyStation.id).length;
-              const needyMax = (needyStation as any).max_staff ?? 99;
-              if (needyCount >= needyMax) continue;
-              mlt.station_id = needyStation.id;
-              backfillMLT.station_id = otherStation.id;
-              const idx = adminParkedMLTs.indexOf(backfillMLT);
-              if (idx >= 0) adminParkedMLTs.splice(idx, 1);
-
-              // If the backfill MLT ended up at a non-preferred bench station, try swapping
-              const bfBenchQuals = empStationMap.get(backfillMLT.employee_id)!
-                .filter(sid => !adminStation || sid !== adminStation.id);
-              const bfPreferred = bfBenchQuals[0];
-              if (bfPreferred && backfillMLT.station_id !== bfPreferred) {
-                const bfSwap = dailyGroup.find(a => {
-                  if (a.station_id !== bfPreferred) return false;
-                  if (a.employee_id === backfillMLT.employee_id) return false;
-                  if (!empStationMap.get(a.employee_id)!.includes(backfillMLT.station_id!)) return false;
-                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
-                  return true;
-                });
-                if (bfSwap) {
-                  const tmpSid = backfillMLT.station_id;
-                  backfillMLT.station_id = bfPreferred;
-                  bfSwap.station_id = tmpSid;
-                }
-              }
-
-              break;
-            }
-            if (dailyGroup.filter(a => a.station_id === needyStation.id)
-              .some(a => empRoleMap.get(a.employee_id) === 'mlt')) break;
-          }
-        }
-
-        // Weekend MLT float: on weekends, Hema and Chemistry share MLT coverage.
-        // If a station like Micro needs an MLT, we can move one from Hema/Chem
-        // as long as the partner station still has an MLT to float.
-        const thisDate = dailyGroup[0]?.date;
-        const thisDow = thisDate ? getDow(thisDate) : -1;
-        const isWeekendDay = thisDow === 0 || thisDow === 6;
-        if (isWeekendDay) {
-          const hemaStation = realStations.find(s => s.name === 'Hematology/UA');
-          const chemStation = realStations.find(s => s.name === 'Chemistry');
-
-          for (const needyStation of stationsNeedingMLT) {
-            // Skip if this station already got an MLT from chain swaps above
-            const nowHasMLT = dailyGroup.filter(a => a.station_id === needyStation.id)
-              .some(a => empRoleMap.get(a.employee_id) === 'mlt');
-            if (nowHasMLT) continue;
-
-            // Try moving an MLT from Hema if Chemistry has one (or vice versa)
-            const floatPairs = [
-              { from: hemaStation, partner: chemStation },
-              { from: chemStation, partner: hemaStation },
-            ];
-            for (const { from, partner } of floatPairs) {
-              if (!from || !partner) continue;
-              // Partner must have an MLT to provide float coverage
-              const partnerHasMLT = dailyGroup.filter(a => a.station_id === partner.id)
-                .some(a => empRoleMap.get(a.employee_id) === 'mlt');
-              if (!partnerHasMLT) continue;
-
-              const fromMLTs = dailyGroup.filter(a =>
-                a.station_id === from.id && empRoleMap.get(a.employee_id) === 'mlt'
-              );
-              for (const mlt of fromMLTs) {
-                if (!empStationMap.get(mlt.employee_id)!.includes(needyStation.id)) continue;
-                const needyCount = dailyGroup.filter(a => a.station_id === needyStation.id).length;
-                const needyMax = (needyStation as any).max_staff ?? 99;
-                if (needyCount >= needyMax) continue;
-                // Move MLT to needy station — Hema/Chem float covers the gap
-                mlt.station_id = needyStation.id;
-                break;
-              }
-              if (dailyGroup.filter(a => a.station_id === needyStation.id)
-                .some(a => empRoleMap.get(a.employee_id) === 'mlt')) break;
-            }
-          }
-        }
-
-        // On thin days (<=10 AM staff), pull Admin-preferred MLTs to real stations
-        // to maximize coverage rather than leaving them idle on Admin
-        const totalStaff = dailyGroup.length;
-        const adminCount = adminStation ? dailyGroup.filter(a =>
-          a.station_id === adminStation.id && empRoleMap.get(a.employee_id) === 'admin'
-        ).length : 0;
-        const remainingAdminMLTs = adminStation ? dailyGroup.filter(a =>
-          a.station_id === adminStation.id && empRoleMap.get(a.employee_id) === 'mlt'
-        ) : [];
-
-        if (totalStaff <= 10 && remainingAdminMLTs.length > 0 && adminCount >= 1) {
-          for (const adminMLT of remainingAdminMLTs) {
-            // Find the best real station: prefer understaffed, then any with room
-            const candidates = empStationMap.get(adminMLT.employee_id)!
-              .filter(sid => !adminStation || sid !== adminStation.id)
-              .map(sid => {
-                const stn = realStations.find(s => s.id === sid);
-                if (!stn) return null;
-                const cur = dailyGroup.filter(a => a.station_id === sid).length;
-                const max = (stn as any).max_staff ?? 99;
-                const min = groupShiftName === 'am' ? (stn as any).min_staff_am ?? stn.min_staff ?? 1 : stn.min_staff ?? 1;
-                return { sid, cur, max, min, deficit: min - cur };
-              })
-              .filter((s): s is NonNullable<typeof s> => s !== null && s.cur < s.max)
-              .sort((a, b) => b.deficit - a.deficit); // most understaffed first
-
-            if (candidates.length > 0) {
-              adminMLT.station_id = candidates[0].sid;
-            }
-          }
-        }
-      }
-
-      // Daily over-max fix: move excess employees from overstaffed to understaffed stations
-      const getStationMax = (stn: any) => stn.max_staff ?? 99;
-      const getStationMin = (stn: any) =>
-        groupShiftName === 'am' ? stn.min_staff_am ?? stn.min_staff ?? 1
-        : groupShiftName === 'pm' ? stn.min_staff_pm ?? stn.min_staff ?? 1
-        : groupShiftName === 'night' ? stn.min_staff_night ?? stn.min_staff ?? 1
-        : stn.min_staff ?? 1;
-
-      for (const dailyGroup of dailyGroups) {
-        let improved = true;
-        while (improved) {
-          improved = false;
-          for (const station of realStations) {
-            const maxAllowed = getStationMax(station);
-            const assignees = dailyGroup.filter(a => a.station_id === station.id);
-            if (assignees.length <= maxAllowed) continue;
-
-            // Find the most flexible person here to move elsewhere
-            const moveCandidates = assignees
-              .filter(a => empRoleMap.get(a.employee_id) !== 'admin')
-              .map(a => ({
-                a,
-                flex: empStationMap.get(a.employee_id)!.filter(sid => !adminStation || sid !== adminStation.id).length,
-                isMlt: empRoleMap.get(a.employee_id) === 'mlt',
-              }))
-              .sort((x, y) => {
-                // Keep MLTs in place if this station requires them (move non-MLTs first)
-                if (station.require_cls === 1) {
-                  if (x.isMlt !== y.isMlt) return x.isMlt ? 1 : -1;
-                }
-                return y.flex - x.flex; // most flexible first
-              });
-
-            for (const { a: candidate } of moveCandidates) {
-              // Find an understaffed station they can go to
-              const altStations = empStationMap.get(candidate.employee_id)!
-                .filter(sid => sid !== station.id && (!adminStation || sid !== adminStation.id))
-                .map(sid => {
-                  const stn = realStations.find(s => s.id === sid);
-                  if (!stn) return null;
-                  const current = dailyGroup.filter(a => a.station_id === sid).length;
-                  const min = getStationMin(stn);
-                  const max = getStationMax(stn);
-                  return { sid, current, min, max, deficit: min - current };
-                })
-                .filter((s): s is NonNullable<typeof s> => s !== null && s.current < s.max)
-                .sort((a, b) => b.deficit - a.deficit); // most understaffed first
-
-              if (altStations.length > 0) {
-                candidate.station_id = altStations[0].sid;
-                improved = true;
-                break; // recheck this station
-              }
-            }
-
-            // If still overstaffed, try moving someone to Admin
-            if (dailyGroup.filter(a => a.station_id === station.id).length > maxAllowed && adminStation) {
-              const toAdmin = assignees.find(a =>
-                empStationMap.get(a.employee_id)!.includes(adminStation.id) &&
-                empRoleMap.get(a.employee_id) !== 'admin' &&
-                empRoleMap.get(a.employee_id) !== 'mlt' // MLTs should never go to Admin
-              );
-              if (toAdmin) {
-                toAdmin.station_id = adminStation.id;
-                improved = true;
-              }
-            }
-          }
-        }
-      }
-
-      // Max 1 MLT per station: if a station has 2+ MLTs, move extras to stations without MLTs
-      for (const dailyGroup of dailyGroups) {
-        for (const station of realStations) {
-          const stationMLTs = dailyGroup.filter(a =>
-            a.station_id === station.id && empRoleMap.get(a.employee_id) === 'mlt'
-          );
-          if (stationMLTs.length <= 1) continue;
-
-          // Keep the one with fewest alternative stations (most locked), move the rest
-          const sortedMLTs = stationMLTs.sort((a, b) => {
-            const aFlex = empStationMap.get(a.employee_id)!.filter(sid => !adminStation || sid !== adminStation.id).length;
-            const bFlex = empStationMap.get(b.employee_id)!.filter(sid => !adminStation || sid !== adminStation.id).length;
-            return aFlex - bFlex; // least flexible first (stays)
-          });
-
-          for (let i = 1; i < sortedMLTs.length; i++) {
-            const excessMLT = sortedMLTs[i];
-            // Find a station that needs an MLT but doesn't have one
-            const needyStations = realStations.filter(s => {
-              if (s.id === station.id) return false;
-              if (s.require_cls !== 1) return false;
-              if (!empStationMap.get(excessMLT.employee_id)!.includes(s.id)) return false;
-              const hasMLT = dailyGroup.filter(a => a.station_id === s.id)
-                .some(a => empRoleMap.get(a.employee_id) === 'mlt');
-              if (hasMLT) return false;
-              const cur = dailyGroup.filter(a => a.station_id === s.id).length;
-              const max = getStationMax(s);
-              return cur < max; // must have room
-            }).sort((a, b) => {
-              const aCur = dailyGroup.filter(x => x.station_id === a.id).length;
-              const bCur = dailyGroup.filter(x => x.station_id === b.id).length;
-              const aMin = getStationMin(a);
-              const bMin = getStationMin(b);
-              return (aCur - aMin) - (bCur - bMin); // most understaffed first
-            });
-
-            if (needyStations.length > 0) {
-              excessMLT.station_id = needyStations[0].id;
-            }
-            // MLTs should never go to Admin — if no needy station, they stay where they are
-            // (2 MLTs at same station is less bad than an MLT on Admin)
-          }
-        }
-      }
-
-      // CLS rebalance: stations with require_cls=1 need at least one CLS.
-      // If a station has only MLTs (no CLS), swap an MLT out with a CLS from
-      // another station that has multiple CLS employees.
-      for (const dailyGroup of dailyGroups) {
-        for (const station of realStations) {
-          if (station.require_cls !== 1) continue;
-          const assignees = dailyGroup.filter(a => a.station_id === station.id);
-          if (assignees.length === 0) continue;
-          const hasCLS = assignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
-          if (hasCLS) continue;
-
-          // No CLS here — find a CLS at another station to swap with an MLT here
-          const mltHere = assignees.find(a => empRoleMap.get(a.employee_id) === 'mlt');
-          if (!mltHere) continue; // all admins, can't fix
-
-          for (const otherStation of realStations) {
-            if (otherStation.id === station.id) continue;
-            const otherAssignees = dailyGroup.filter(a => a.station_id === otherStation.id);
-            const otherCLS = otherAssignees.filter(a => empRoleMap.get(a.employee_id) === 'cls');
-            // Only take a CLS if the other station has 2+ CLS (or doesn't require CLS)
-            const otherNeedsCLS = otherStation.require_cls === 1;
-            if (otherNeedsCLS && otherCLS.length <= 1) continue;
-
-            // Find a CLS there who can work here, and our MLT can work there
-            for (const cls of otherCLS) {
-              if (!empStationMap.get(cls.employee_id)!.includes(station.id)) continue;
-              if (!empStationMap.get(mltHere.employee_id)!.includes(otherStation.id)) continue;
-              // Swap
-              cls.station_id = station.id;
-              mltHere.station_id = otherStation.id;
-              break;
-            }
-            // Check if we fixed it
-            const nowHasCLS = dailyGroup.filter(a => a.station_id === station.id)
-              .some(a => empRoleMap.get(a.employee_id) === 'cls');
-            if (nowHasCLS) break;
-          }
-        }
-      }
-
-      // ── Post-assignment fixups ──
-      // Order: admin supersession → 1-MLT enforcement → CLS rebalance
-      // All swaps must respect: max 1 MLT per bench station.
-
-      if (adminStation) {
-        for (const dailyGroup of dailyGroups) {
-          // Helper: count MLTs at a station
-          const mltCountAt = (sid: number) =>
-            dailyGroup.filter(a => a.station_id === sid && empRoleMap.get(a.employee_id) === 'mlt').length;
-          const countAt = (sid: number) => dailyGroup.filter(a => a.station_id === sid).length;
-
-          // ── A. Admin supersession: Shayna replaces Jethro on bench ──
-          // Case 1: admin-parked at Admin → swap with admin-role on bench
-          // Case 2: admin-parked on bench (not preferred) → swap with admin-role at preferred
-          const allAdminParked = dailyGroup.filter(a => {
-            const q = empStationMap.get(a.employee_id);
-            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
-          });
-          for (const ap of allAdminParked) {
-            const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
-            if (ap.station_id === adminStation.id) {
-              // At Admin → try to replace admin-role on bench
-              for (const preferredSid of benchQuals) {
-                if (mltCountAt(preferredSid) >= 1) continue;
-                const adminOnBench = dailyGroup.find(a =>
-                  a.station_id === preferredSid
-                  && empRoleMap.get(a.employee_id) === 'admin'
-                  && empStationMap.get(a.employee_id)!.includes(adminStation.id)
-                );
-                if (adminOnBench) {
-                  ap.station_id = preferredSid;
-                  adminOnBench.station_id = adminStation.id;
-                  break;
-                }
-              }
-            } else {
-              // On bench but not at preferred → swap with admin-role at preferred
-              const preferredSid = benchQuals[0];
-              if (!preferredSid || preferredSid === ap.station_id) continue;
-              const adminAtPreferred = dailyGroup.find(a =>
-                a.station_id === preferredSid
-                && empRoleMap.get(a.employee_id) === 'admin'
-                && empStationMap.get(a.employee_id)!.includes(ap.station_id!)
-              );
-              if (adminAtPreferred) {
-                // Check 1-MLT: ap(MLT) goes to preferred, admin goes to ap's current station
-                const prefResult = mltCountAt(preferredSid) + 1; // ap is MLT
-                const curResult = mltCountAt(ap.station_id!) - 1; // ap leaves
-                if (prefResult <= 1 && curResult <= 1) {
-                  const curSid = ap.station_id!;
-                  ap.station_id = preferredSid;
-                  adminAtPreferred.station_id = curSid;
-                }
-              }
-            }
-          }
-
-          // ── B. Enforce max 1 MLT per bench station ──
-          // Repeat until stable (max 30 iterations for safety)
-          for (let iter = 0; iter < 30; iter++) {
-            let anyFixed = false;
-            for (const station of realStations) {
-              if (station.id === adminStation.id) continue;
-              const assignees = dailyGroup.filter(a => a.station_id === station.id);
-              const mlts = assignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt');
-              if (mlts.length < 2) continue;
-              if (assignees.length <= (station.min_staff ?? 1)) continue; // can't reduce below min
-
-              // Sort MLTs to try: admin-parked first, then per-diem, then most-flexible last
-              const sortedMLTs = [...mlts].sort((a, b) => {
-                const aAP = empStationMap.get(a.employee_id)![0] === adminStation.id ? 0 : 1;
-                const bAP = empStationMap.get(b.employee_id)![0] === adminStation.id ? 0 : 1;
-                if (aAP !== bAP) return aAP - bAP;
-                const aPD = employees.find(e => e.id === a.employee_id)?.employment_type === 'per-diem' ? 0 : 1;
-                const bPD = employees.find(e => e.id === b.employee_id)?.employment_type === 'per-diem' ? 0 : 1;
-                if (aPD !== bPD) return aPD - bPD;
-                // More qualifications = more flexible = try first
-                return empStationMap.get(b.employee_id)!.length - empStationMap.get(a.employee_id)!.length;
-              });
-
-              let done = false;
-              for (const toMove of sortedMLTs) {
-                if (done) break;
-                const quals = empStationMap.get(toMove.employee_id)!;
-
-                // Strategy 1: move to a bench station that has 0 MLTs and room
-                for (const target of realStations) {
-                  if (target.id === station.id || target.id === adminStation.id) continue;
-                  if (!quals.includes(target.id)) continue;
-                  if (mltCountAt(target.id) >= 1) continue;
-                  const tCount = countAt(target.id);
-                  const tMax = (target as any).max_staff ?? 99;
-                  if (tCount >= tMax) continue;
-                  toMove.station_id = target.id;
-                  done = true;
-                  break;
-                }
-                if (done) break;
-
-                // Strategy 2: swap with a CLS at another station
-                for (const other of realStations) {
-                  if (other.id === station.id || other.id === adminStation.id) continue;
-                  if (!quals.includes(other.id)) continue;
-                  if (mltCountAt(other.id) >= 1) continue;
-                  const swapCLS = dailyGroup.find(a =>
-                    a.station_id === other.id && empRoleMap.get(a.employee_id) === 'cls'
-                    && empStationMap.get(a.employee_id)!.includes(station.id)
-                  );
-                  if (swapCLS) {
-                    toMove.station_id = other.id;
-                    swapCLS.station_id = station.id;
-                    done = true;
-                    break;
-                  }
-                }
-                if (done) break;
-
-                // Strategy 3: displace an admin-parked employee → Admin
-                for (const other of realStations) {
-                  if (other.id === station.id || other.id === adminStation.id) continue;
-                  if (!quals.includes(other.id)) continue;
-                  const ap = dailyGroup.find(a => {
-                    if (a.station_id !== other.id) return false;
-                    const q = empStationMap.get(a.employee_id);
-                    return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
-                  });
-                  if (!ap) continue;
-                  const apIsMLT = empRoleMap.get(ap.employee_id) === 'mlt';
-                  const resultMLTs = mltCountAt(other.id) - (apIsMLT ? 1 : 0) + 1;
-                  if (resultMLTs > 1) continue;
-                  toMove.station_id = other.id;
-                  ap.station_id = adminStation.id;
-                  done = true;
-                  break;
-                }
-                if (done) break;
-
-                // Strategy 4: if admin-parked, send back to Admin
-                if (quals[0] === adminStation.id) {
-                  toMove.station_id = adminStation.id;
-                  done = true;
-                }
-              }
-
-              if (done) anyFixed = true;
-            }
-            if (!anyFixed) break;
-          }
-
-          // ── C. CLS rebalance: stations with require_cls=1 need ≥1 CLS ──
-          for (const station of realStations) {
-            if (station.require_cls !== 1) continue;
-            const assignees = dailyGroup.filter(a => a.station_id === station.id);
-            if (assignees.length === 0) continue;
-            if (assignees.some(a => empRoleMap.get(a.employee_id) === 'cls')) continue;
-
-            const mltHere = assignees.find(a => empRoleMap.get(a.employee_id) === 'mlt');
-            if (!mltHere) continue;
-
-            for (const other of realStations) {
-              if (other.id === station.id) continue;
-              const otherCLS = dailyGroup.filter(a =>
-                a.station_id === other.id && empRoleMap.get(a.employee_id) === 'cls'
-              );
-              const otherNeedsCLS = other.require_cls === 1;
-              if (otherNeedsCLS && otherCLS.length <= 1) continue;
-              if (otherCLS.length < 1) continue;
-
-              const cls = otherCLS.find(c =>
-                empStationMap.get(c.employee_id)!.includes(station.id)
-                && empStationMap.get(mltHere.employee_id)!.includes(other.id)
-              );
-              if (cls) {
-                // Only swap if it won't create 2 MLTs at the other station
-                if (mltCountAt(other.id) >= 1) continue;
-                cls.station_id = station.id;
-                mltHere.station_id = other.id;
-                break;
-              }
-            }
-          }
-
-          // ── D. Shayna preference: if she's on bench but not at #1, swap ──
-          // Only if it won't violate 1-MLT rule
-          const adminParkedOnBench = dailyGroup.filter(a => {
-            const q = empStationMap.get(a.employee_id);
-            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin'
-              && a.station_id !== adminStation.id;
-          });
-          for (const ap of adminParkedOnBench) {
-            const currentSid = ap.station_id!;
-            if (!currentSid) continue;
-            const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
-            const preferredSid = benchQuals[0];
-            if (!preferredSid || preferredSid === currentSid) continue;
-
-            // Direct swap — only if it doesn't create 2 MLTs at either station
-            const directSwap = dailyGroup.find(a => {
-              if (a.station_id !== preferredSid) return false;
-              if (a.employee_id === ap.employee_id) return false;
-              if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
-              if (empRoleMap.get(a.employee_id) === 'admin') return false;
-              // After swap: ap(MLT) goes to preferred, other goes to current
-              // Check 1-MLT: at preferred, remove other + add ap(MLT) = mltCount - (other is MLT?1:0) + 1
-              const otherIsMLT = empRoleMap.get(a.employee_id) === 'mlt';
-              const prefMLTs = mltCountAt(preferredSid) - (otherIsMLT ? 1 : 0) + 1;
-              const curMLTs = mltCountAt(currentSid) - 1 + (otherIsMLT ? 1 : 0);
-              return prefMLTs <= 1 && curMLTs <= 1;
-            });
-            if (directSwap) {
-              ap.station_id = preferredSid;
-              directSwap.station_id = currentSid;
-              continue;
-            }
-
-            // Chain swap (3-way) — only if result has ≤1 MLT everywhere
-            const atPreferred = dailyGroup.filter(a =>
-              a.station_id === preferredSid && a.employee_id !== ap.employee_id
-              && empRoleMap.get(a.employee_id) !== 'admin'
-            );
-            let chained = false;
-            for (const middle of atPreferred) {
-              const middleQuals = empStationMap.get(middle.employee_id)!
-                .filter(sid => sid !== preferredSid && sid !== adminStation.id);
-              for (const thirdSid of middleQuals) {
-                const tail = dailyGroup.find(a => {
-                  if (a.station_id !== thirdSid) return false;
-                  if (a.employee_id === ap.employee_id || a.employee_id === middle.employee_id) return false;
-                  if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
-                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
-                  return true;
-                });
-                if (!tail) continue;
-                // Simulate: ap→preferred, middle→third, tail→current
-                const midIsMLT = empRoleMap.get(middle.employee_id) === 'mlt';
-                const tailIsMLT = empRoleMap.get(tail.employee_id) === 'mlt';
-                const prefMLTs = mltCountAt(preferredSid) - (midIsMLT ? 1 : 0) + 1;
-                const thirdMLTs = mltCountAt(thirdSid) + (midIsMLT ? 1 : 0) - (tailIsMLT ? 1 : 0);
-                const curMLTs = mltCountAt(currentSid) - 1 + (tailIsMLT ? 1 : 0);
-                if (prefMLTs > 1 || thirdMLTs > 1 || curMLTs > 1) continue;
-                ap.station_id = preferredSid;
-                middle.station_id = thirdSid;
-                tail.station_id = currentSid;
-                chained = true;
-                break;
-              }
-              if (chained) break;
-            }
-            // Strategy 3: find ANY MLT on the board who can cover currentSid,
-            // move them there, and move ap to preferred (displacing someone who goes
-            // to where the covering MLT was)
-            if (!chained) {
-              // Find an MLT anywhere (not at preferred, not ap) who can do Micro
-              const coverMLT = dailyGroup.find(a => {
-                if (a.employee_id === ap.employee_id) return false;
-                if (a.station_id === preferredSid) return false;
-                if (a.station_id === currentSid) return false;
-                if (empRoleMap.get(a.employee_id) !== 'mlt') return false;
-                if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
-                return true;
-              });
-              if (coverMLT) {
-                const coverFromSid = coverMLT.station_id!;
-                // Someone at preferred needs to go to coverMLT's old station
-                const filler = dailyGroup.find(a => {
-                  if (a.station_id !== preferredSid) return false;
-                  if (a.employee_id === ap.employee_id) return false;
-                  if (!empStationMap.get(a.employee_id)!.includes(coverFromSid)) return false;
-                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
-                  return true;
-                });
-                if (filler) {
-                  // Check 1-MLT for all affected stations
-                  const fillerIsMLT = empRoleMap.get(filler.employee_id) === 'mlt';
-                  const pMLTs = mltCountAt(preferredSid) - (fillerIsMLT ? 1 : 0) + 1;
-                  const cMLTs = mltCountAt(currentSid) - 1 + 1; // ap leaves, coverMLT arrives (MLT)
-                  const fMLTs = mltCountAt(coverFromSid) - 1 + (fillerIsMLT ? 1 : 0);
-                  if (pMLTs <= 1 && cMLTs <= 1 && fMLTs <= 1) {
-                    ap.station_id = preferredSid;
-                    filler.station_id = coverFromSid;
-                    coverMLT.station_id = currentSid;
-                    chained = true;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // ── E. Per-diem optimization: only keep per-diem at stations that need them ──
-      // Per-diem employees should fill gaps, not pad already-covered stations.
-      // Priority: 1) stations below min_staff, 2) CLS/MLT role gaps, 3) stations
-      // below max that could use help. Otherwise send to Admin.
-      if (adminStation) {
-        for (const dailyGroup of dailyGroups) {
-          const perDiemAssignments = dailyGroup.filter(a => {
-            const emp = employees.find(e => e.id === a.employee_id);
-            return emp && emp.employment_type === 'per-diem';
-          });
-
-          for (const pda of perDiemAssignments) {
-            const currentSid = pda.station_id;
-            if (!currentSid || currentSid === adminStation.id) continue;
-
-            // Only float MLT per-diems — CLS per-diems stay at their station
-            const pdaRole = empRoleMap.get(pda.employee_id);
-            if (pdaRole === 'cls') continue;
-
-            const station = realStations.find(s => s.id === currentSid);
-            if (!station) continue;
-
-            const stationStaff = dailyGroup.filter(a => a.station_id === currentSid);
-            const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-              : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-              : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-              : station.min_staff ?? 1;
-
-            // If station is at or below min, per-diem is needed here — keep them
-            if (stationStaff.length <= minNeeded) continue;
-
-            // If per-diem is the only CLS or only MLT at a require_cls station, keep them
-            const role = empRoleMap.get(pda.employee_id);
-            if (station.require_cls === 1) {
-              if (role === 'cls') {
-                const otherCLS = stationStaff.filter(a => a.employee_id !== pda.employee_id && empRoleMap.get(a.employee_id) === 'cls');
-                if (otherCLS.length === 0) continue; // only CLS here, keep
-              }
-              if (role === 'mlt') {
-                const otherMLT = stationStaff.filter(a => a.employee_id !== pda.employee_id && empRoleMap.get(a.employee_id) === 'mlt');
-                if (otherMLT.length === 0) continue; // only MLT here, keep
-              }
-            }
-
-            // Per-diem is extra at this station — try to move them somewhere more useful
-            const quals = empStationMap.get(pda.employee_id)!;
-            let moved = false;
-
-            // Priority 1: move to an understaffed station
-            for (const target of realStations) {
-              if (target.id === currentSid || target.id === adminStation.id) continue;
-              if (!quals.includes(target.id)) continue;
-              const targetStaff = dailyGroup.filter(a => a.station_id === target.id);
-              const targetMin = groupShiftName === 'am' ? (target as any).min_staff_am ?? target.min_staff ?? 1
-                : groupShiftName === 'pm' ? (target as any).min_staff_pm ?? target.min_staff ?? 1
-                : groupShiftName === 'night' ? (target as any).min_staff_night ?? target.min_staff ?? 1
-                : target.min_staff ?? 1;
-              if (targetStaff.length < targetMin) {
-                // Check 1-MLT constraint
-                if (role === 'mlt') {
-                  const targetMLTs = targetStaff.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
-                  if (targetMLTs >= 1) continue;
-                }
-                pda.station_id = target.id;
-                moved = true;
-                break;
-              }
-            }
-
-            // Priority 2: move to a station missing CLS/MLT role
-            if (!moved) {
-              for (const target of realStations) {
-                if (target.id === currentSid || target.id === adminStation.id) continue;
-                if (target.require_cls !== 1) continue;
-                if (!quals.includes(target.id)) continue;
-                const targetStaff = dailyGroup.filter(a => a.station_id === target.id);
-                const targetMax = (target as any).max_staff ?? 99;
-                if (targetStaff.length >= targetMax) continue;
-                if (role === 'cls' && !targetStaff.some(a => empRoleMap.get(a.employee_id) === 'cls')) {
-                  pda.station_id = target.id;
-                  moved = true;
-                  break;
-                }
-                if (role === 'mlt' && !targetStaff.some(a => empRoleMap.get(a.employee_id) === 'mlt')) {
-                  const targetMLTs = targetStaff.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
-                  if (targetMLTs >= 1) continue;
-                  pda.station_id = target.id;
-                  moved = true;
-                  break;
-                }
-              }
-            }
-
-            // If nowhere useful, send to Admin
-            if (!moved) {
-              pda.station_id = adminStation.id;
-            }
-          }
-        }
-      }
-
-      // ── Final 1-MLT enforcement (catch any violations from per-diem placement) ──
-      if (adminStation) {
-        for (const dailyGroup of dailyGroups) {
-          for (const station of realStations) {
-            if (station.id === adminStation.id) continue;
-            const assignees = dailyGroup.filter(a => a.station_id === station.id);
-            const mlts = assignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt');
-            if (mlts.length < 2) continue;
-            // Move per-diem MLT to Admin
-            const pdMLT = mlts.find(a => employees.find(e => e.id === a.employee_id)?.employment_type === 'per-diem');
-            if (pdMLT) {
-              pdMLT.station_id = adminStation.id;
-            }
-          }
-        }
-      }
-
-      // Per-day warnings (staffing may vary day-to-day due to PTO/off days)
-      for (const dailyGroup of dailyGroups) {
-        const date = dailyGroup[0].date;
-        for (const station of realStations) {
-          const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-            : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-            : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-            : station.min_staff ?? 1;
-          const maxAllowed = (station as any).max_staff ?? 99;
-          const stationAssignees = dailyGroup.filter(a => a.station_id === station.id);
-          const assignedCount = stationAssignees.length;
-          if (assignedCount < minNeeded) {
-            // On weekends, Hema and Chemistry share coverage via MLT float —
-            // suppress understaffing if combined Hema+Chem meets combined needs
-            const wDow = getDow(date);
-            const isWkend = wDow === 0 || wDow === 6;
+          const stationAssignees = group.filter(a => a.station_id === station.id);
+          const minNeeded = getMinStaff(station, shiftName);
+          const maxAllowed = station.max_staff ?? 99;
+
+          // CRITICAL: understaffed
+          if (stationAssignees.length < minNeeded) {
+            const dow = getDow(date);
+            const isWkend = dow === 0 || dow === 6;
             const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
-            let suppressUnderstaff = false;
-            if (isWkend && isHemaOrChem) {
-              // On weekends, 1 MLT floats between Hema and Chemistry — this satisfies
-              // the min requirement for both stations, so suppress individual understaffing
-              suppressUnderstaff = true;
-            }
-            if (!suppressUnderstaff) {
-              const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
-              passWarnings.push(`CRITICAL: ${station.name} needs ${minNeeded} staff but only ${assignedCount} assigned on ${date} (${shiftName})`);
+            if (!(isWkend && isHemaOrChem)) {
+              passWarnings.push(`CRITICAL: ${station.name} needs ${minNeeded} staff but only ${stationAssignees.length} assigned on ${date} (${shiftLabel})`);
             }
           }
-          if (assignedCount > maxAllowed) {
-            const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
-            passWarnings.push(`WARNING: ${station.name} has ${assignedCount} staff but max is ${maxAllowed} on ${date} (${shiftName})`);
+
+          // WARNING: overstaffed
+          if (stationAssignees.length > maxAllowed) {
+            passWarnings.push(`WARNING: ${station.name} has ${stationAssignees.length} staff (max ${maxAllowed}) on ${date} (${shiftLabel})`);
           }
+
           if (stationAssignees.length > 0) {
+            // PIVOTAL: no MLT at require_cls station
             if (station.require_cls === 1) {
               const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
               if (!hasMLT) {
-                // On weekends, MLTs float between Hema and Chemistry — if either has
-                // an MLT, suppress the warning for the other
                 const dow = getDow(date);
                 const isWeekend = dow === 0 || dow === 6;
                 const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
-                let suppressMLTWarning = false;
-                if (isWeekend && isHemaOrChem) {
-                  // On weekends, 1 MLT floats between Hema and Chemistry —
-                  // suppress "no MLT" for both stations entirely
-                  suppressMLTWarning = true;
-                }
-                if (!suppressMLTWarning) {
-                  const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
-                  passWarnings.push(`PIVOTAL: ${station.name} has no MLT assigned on ${date} (${shiftName})`);
+                if (!(isWeekend && isHemaOrChem)) {
+                  passWarnings.push(`PIVOTAL: ${station.name} has no MLT assigned on ${date} (${shiftLabel})`);
                 }
               }
             }
-            // Check CLS coverage
+
+            // PIVOTAL: no CLS at require_cls station
             if (station.require_cls === 1) {
-              const hasCLS = stationAssignees.some(a => {
-                const role = empRoleMap.get(a.employee_id);
-                return role === 'cls' || role === 'admin';
-              });
+              const hasCLS = stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap));
               if (!hasCLS) {
-                const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
-                passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftName})`);
+                passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftLabel})`);
               }
             }
           }
         }
       }
-    }
 
-    // ── Station warnings (exclude Admin station) ──
-    const warnStations = stations.filter(s => s.name !== 'Admin');
-
-    // Stations with no qualified employees
-    for (const station of warnStations) {
-      const qualifiedEmps = employees.filter(e => empStationMap.get(e.id)?.includes(station.id));
-      if (qualifiedEmps.length === 0) {
-        passWarnings.push(`Station "${station.name}" has no qualified employees assigned`);
-      }
-    }
-
-    // Pivotal employee detection
-    for (const station of warnStations) {
-      const qualifiedIds = employees.filter(e => empStationMap.get(e.id)?.includes(station.id)).map(e => e.id);
-
-      if (qualifiedIds.length <= 1) {
-        const name = qualifiedIds.length === 1
-          ? employees.find(e => e.id === qualifiedIds[0])?.name
-          : 'No one';
-        passWarnings.push(`CRITICAL: ${name} is the ONLY person qualified for ${station.name} — no backup`);
-        continue;
+      // Station-level warnings
+      for (const station of realStations) {
+        const qualifiedEmps = employees.filter(e => empStationMap.get(e.id)?.includes(station.id));
+        if (qualifiedEmps.length === 0) {
+          passWarnings.push(`Station "${station.name}" has no qualified employees assigned`);
+        }
+        const qualifiedIds = qualifiedEmps.map(e => e.id);
+        if (qualifiedIds.length <= 1 && qualifiedIds.length > 0) {
+          const name = employees.find(e => e.id === qualifiedIds[0])?.name;
+          passWarnings.push(`CRITICAL: ${name} is the ONLY person qualified for ${station.name} — no backup`);
+        }
       }
 
-      for (const [, group] of shiftDateGroups) {
-        const stationAssignees = group.filter(a => a.station_id === station.id);
-        if (stationAssignees.length === 1) {
-          // If min_staff is 1, having 1 person meets the requirement — not pivotal
-          const groupShiftName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
-          const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-            : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-            : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-            : station.min_staff ?? 1;
-          if (minNeeded <= 1) continue;
-
-          const pivotal = employees.find(e => e.id === stationAssignees[0].employee_id);
-          const others = qualifiedIds.filter(id => id !== stationAssignees[0].employee_id);
-          const anyBackup = others.some(id => result.some(r => r.employee_id === id && r.date === stationAssignees[0].date));
-          if (!anyBackup) {
-            const shiftName = shifts.find(s => s.id === stationAssignees[0].shift_id)?.name ?? 'Unknown';
-            passWarnings.push(`PIVOTAL: ${pivotal?.name} is sole ${station.name} coverage on ${stationAssignees[0].date} (${shiftName})`);
+      // Time-off conflicts
+      for (const to of timeOff) {
+        const empStations = empStationMap.get(to.employee_id) ?? [];
+        const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
+        for (const stationId of empStations) {
+          const station = realStations.find(s => s.id === stationId);
+          if (!station) continue;
+          const others = employees.filter(e => e.id !== to.employee_id && empStationMap.get(e.id)?.includes(stationId));
+          const othersWorking = others.filter(e => result.some(r => r.employee_id === e.id && r.date === to.date));
+          if (othersWorking.length === 0) {
+            passWarnings.push(`CRITICAL: ${empName} is off ${to.date} but no other ${station.name}-qualified employee is scheduled — deny time-off or reassign coverage`);
           }
         }
       }
-    }
 
-    // Time-off conflicts with station coverage
-    for (const to of timeOff) {
-      const empStations = empStationMap.get(to.employee_id) ?? [];
-      if (empStations.length === 0) continue;
-      const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
-      for (const stationId of empStations) {
-        const station = warnStations.find(s => s.id === stationId);
-        if (!station) continue;
-        const others = employees.filter(e => e.id !== to.employee_id && empStationMap.get(e.id)?.includes(stationId));
-        const othersWorking = others.filter(e => result.some(r => r.employee_id === e.id && r.date === to.date));
-        if (othersWorking.length === 0) {
-          passWarnings.push(`CRITICAL: ${empName} is off ${to.date} but no other ${station.name}-qualified employee is scheduled — deny time-off or reassign coverage`);
+      // Score this pass
+      const passScore = scorePass(result, stations, shifts, empRoleMap);
+      if (passScore.total < bestScore) {
+        bestScore = passScore.total;
+        bestPassWarnings = [...passWarnings];
+        bestStationAssignments = new Map();
+        for (const a of result) {
+          if (a.station_id !== null) {
+            bestStationAssignments.set(`${a.employee_id}-${a.date}-${a.shift_id}`, a.station_id);
+          }
         }
       }
-    }
-
-    // Count criticals for this pass
-    const passCriticals = countCriticals(result, stations, shifts);
-    if (passCriticals < bestCriticalCount) {
-      bestCriticalCount = passCriticals;
-      bestPassWarnings = [...passWarnings];
-      bestStationAssignments = new Map();
-      for (const a of result) {
-        if (a.station_id !== null) {
-          bestStationAssignments.set(`${a.employee_id}-${a.date}-${a.shift_id}`, a.station_id);
-        }
-      }
-    }
     } // end multi-pass loop
 
-    // Merge best pass's warnings into main warnings
+    // Merge best pass's warnings
     warnings.push(...bestPassWarnings);
 
     // Apply best station assignments
@@ -2770,6 +1818,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       }
     }
   }
+
 
   // ═══════════════════════════════════════════════════════════════
   // PHASE 4: Warnings
