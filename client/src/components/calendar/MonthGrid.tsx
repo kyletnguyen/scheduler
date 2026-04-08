@@ -795,45 +795,6 @@ export default function MonthGrid() {
                       }`}>
                         {emp.role}
                       </span>
-                      {employeeDetail === emp.id && (() => {
-                        const empSchedule = assignments.filter(a => a.employee_id === emp.id);
-                        const stationCounts: Record<string, number> = {};
-                        for (const a of empSchedule) {
-                          const s = a.station_name || 'Unassigned';
-                          stationCounts[s] = (stationCounts[s] || 0) + 1;
-                        }
-                        const sorted = Object.entries(stationCounts).sort(([,a],[,b]) => b - a);
-                        return (
-                          <div
-                            className="absolute left-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-50 min-w-[220px]"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div className="text-xs font-bold text-gray-700 mb-2">
-                              {emp.name} — {empSchedule.length} day{empSchedule.length !== 1 ? 's' : ''} this month
-                            </div>
-                            {sorted.length > 0 ? (
-                              <div className="space-y-1">
-                                {sorted.map(([station, count]) => {
-                                  const sd = getStationDisplay(station);
-                                  const pct = empSchedule.length > 0 ? Math.round(count / empSchedule.length * 100) : 0;
-                                  return (
-                                    <div key={station} className="flex items-center gap-2 text-xs">
-                                      <span className={`${sd.bg} text-white text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0`}>
-                                        {sd.abbr}
-                                      </span>
-                                      <span className="text-gray-700 flex-1">{station}</span>
-                                      <span className="font-semibold text-gray-900">{count}d</span>
-                                      <span className="text-gray-400 text-[10px] w-8 text-right">{pct}%</span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            ) : (
-                              <div className="text-xs text-gray-400 italic">No schedule data</div>
-                            )}
-                          </div>
-                        );
-                      })()}
                     </div>
                   </td>
                   {days.map((day) => {
@@ -1257,6 +1218,63 @@ export default function MonthGrid() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Employee Detail Modal */}
+      {employeeDetail !== null && (() => {
+        const emp = employees.find(e => e.id === employeeDetail);
+        if (!emp) return null;
+        const empSchedule = assignments.filter(a => a.employee_id === emp.id);
+        const stationCounts: Record<string, number> = {};
+        for (const a of empSchedule) {
+          const s = a.station_name || 'Unassigned';
+          stationCounts[s] = (stationCounts[s] || 0) + 1;
+        }
+        const sorted = Object.entries(stationCounts).sort(([,a],[,b]) => b - a);
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEmployeeDetail(null)}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+              <div className="px-5 py-3 rounded-t-xl bg-blue-500 flex items-center justify-between">
+                <div>
+                  <h3 className="text-white font-bold text-base">{emp.name}</h3>
+                  <p className="text-white/80 text-xs">
+                    {empSchedule.length} day{empSchedule.length !== 1 ? 's' : ''} scheduled in {format(new Date(month + '-01T00:00:00'), 'MMMM yyyy')}
+                  </p>
+                </div>
+                <button onClick={() => setEmployeeDetail(null)} className="text-white/70 hover:text-white text-xl font-bold">&times;</button>
+              </div>
+              <div className="p-5">
+                {sorted.length > 0 ? (
+                  <div className="space-y-2">
+                    {sorted.map(([station, count]) => {
+                      const sd = getStationDisplay(station);
+                      const pct = empSchedule.length > 0 ? Math.round(count / empSchedule.length * 100) : 0;
+                      return (
+                        <div key={station}>
+                          <div className="flex items-center gap-2 text-sm">
+                            <span className={`${sd.bg} text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0`}>
+                              {sd.abbr}
+                            </span>
+                            <span className="text-gray-700 flex-1 font-medium">{station}</span>
+                            <span className="font-bold text-gray-900">{count}</span>
+                            <span className="text-gray-400 text-xs w-10 text-right">{pct}%</span>
+                          </div>
+                          <div className="ml-9 mt-0.5">
+                            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                              <div className={`h-full ${sd.bg} rounded-full`} style={{ width: `${pct}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400 italic">No schedule data for this month</p>
+                )}
               </div>
             </div>
           </div>
