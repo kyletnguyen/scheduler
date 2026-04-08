@@ -1372,8 +1372,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           let score = 0;
 
-          // Staffing need: negative = urgently needs people
-          if (current < minNeeded) score -= 200 * (minNeeded - current);
+          // Staffing need: negative = urgently needs people (must dominate rotation concerns)
+          if (current < minNeeded) score -= 5000 * (minNeeded - current);
           else score += 100;
 
           // Rotation history
@@ -1454,6 +1454,120 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             weekStationThisWeek.set(empA, stB);
             weekStationThisWeek.set(empB, stA);
             break; // one swap per employee
+          }
+        }
+      }
+    }
+
+// ── Gap-Fill: pull admins to bench + reshuffle CLS to fix understaffing ──
+    function gapFill(
+      pool: Assignment[],
+      locked: Set<number>,
+      stationMap: Map<number, number>,
+      shiftName: string,
+    ) {
+      if (!adminStation) return;
+
+      const getUnderstaffed = () => realStations.filter(s => {
+        const current = [...stationMap.values()].filter(v => v === s.id).length;
+        return current < getMinStaff(s, shiftName);
+      });
+
+      let understaffed = getUnderstaffed();
+      if (understaffed.length === 0) return;
+
+      // Phase 1: Proactively move admins from desk to their bench station to create surplus
+      // This enables chain swaps later (e.g., Darwin→Chem creates surplus, then Mike→BB, Vannie→Micro)
+      const adminsAtDesk = () => pool.filter(a =>
+        stationMap.get(a.employee_id) === adminStation.id
+        && empRoleMap.get(a.employee_id) === 'admin'
+      );
+
+      // First try direct: admin qualified for the understaffed station
+      for (const needyStation of understaffed) {
+        const admin = adminsAtDesk().find(a =>
+          (empStationMap.get(a.employee_id) ?? []).includes(needyStation.id)
+        );
+        if (admin) stationMap.set(admin.employee_id, needyStation.id);
+      }
+
+      understaffed = getUnderstaffed();
+      if (understaffed.length === 0) return;
+
+      // Then try indirect: admin → their bench station (even if not understaffed) to create surplus
+      for (const admin of adminsAtDesk()) {
+        const benchQuals = (empStationMap.get(admin.employee_id) ?? [])
+          .filter(sid => sid !== adminStation.id);
+        if (benchQuals.length === 0) continue;
+
+        // Move admin to their bench station — this creates surplus enabling CLS reshuffles
+        const targetSid = benchQuals[0];
+        const targetStation = realStations.find(s => s.id === targetSid);
+        if (targetStation) {
+          const maxAllowed = targetStation.max_staff ?? 99;
+          const current = [...stationMap.values()].filter(v => v === targetSid).length;
+          if (current < maxAllowed) {
+            stationMap.set(admin.employee_id, targetSid);
+          }
+        }
+      }
+
+      // Phase 2: CLS reshuffle — move CLS from surplus stations to understaffed ones
+      understaffed = getUnderstaffed();
+      for (const needyStation of understaffed) {
+        const deficit = getMinStaff(needyStation, shiftName)
+          - [...stationMap.values()].filter(v => v === needyStation.id).length;
+        if (deficit <= 0) continue;
+
+        for (const [eid, sid] of [...stationMap.entries()]) {
+          if (sid === needyStation.id) continue;
+          if (empRoleMap.get(eid) === 'mlt') continue; // don't move MLTs
+          if (!(empStationMap.get(eid) ?? []).includes(needyStation.id)) continue;
+
+          const oldStation = realStations.find(s => s.id === sid);
+          if (!oldStation) continue;
+          const oldStaff = [...stationMap.values()].filter(v => v === sid).length;
+          const oldMin = getMinStaff(oldStation, shiftName);
+
+          // Only move from stations with surplus
+          if (oldStaff > oldMin) {
+            stationMap.set(eid, needyStation.id);
+            break;
+          }
+
+          // Or if someone else can backfill from a surplus station
+          const backfill = [...stationMap.entries()].find(([bid, bsid]) => {
+            if (bid === eid || bsid === sid) return false;
+            if (empRoleMap.get(bid) === 'mlt') return false;
+            if (!(empStationMap.get(bid) ?? []).includes(sid)) return false;
+            const bStation = realStations.find(s => s.id === bsid);
+            if (!bStation) return false;
+            const bStaff = [...stationMap.values()].filter(v => v === bsid).length;
+            return bStaff > getMinStaff(bStation, shiftName);
+          });
+
+          if (backfill) {
+            stationMap.set(eid, needyStation.id);
+            stationMap.set(backfill[0], sid);
+            break;
+          }
+        }
+      }
+
+      // Phase 3: If admins were moved to bench but station is no longer understaffed,
+      // move them back to Admin (don't waste admin time on bench when not needed)
+      understaffed = getUnderstaffed();
+      if (understaffed.length === 0) {
+        for (const admin of pool.filter(a => empRoleMap.get(a.employee_id) === 'admin')) {
+          const sid = stationMap.get(admin.employee_id);
+          if (!sid || sid === adminStation.id) continue;
+          const station = realStations.find(s => s.id === sid);
+          if (!station) continue;
+          const current = [...stationMap.values()].filter(v => v === sid).length;
+          const minNeeded = getMinStaff(station, shiftName);
+          // Move back to Admin if station has surplus even without this admin
+          if (current > minNeeded) {
+            stationMap.set(admin.employee_id, adminStation.id);
           }
         }
       }
@@ -1633,16 +1747,42 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       }
     }
 
-    // ── Layer 7: Overflow — everyone else goes to Admin ──
+    // ── Layer 7: Overflow — assign remaining to Admin (if qualified) or best bench station ──
     function layer7_overflow(
       pool: Assignment[],
       locked: Set<number>,
       stationMap: Map<number, number>,
+      shiftName: string,
     ) {
-      if (!adminStation) return;
       for (const a of pool) {
-        if (!stationMap.has(a.employee_id)) {
+        if (stationMap.has(a.employee_id)) continue;
+
+        const allQuals = empStationMap.get(a.employee_id) ?? [];
+        const hasAdmin = adminStation && allQuals.includes(adminStation.id);
+
+        if (hasAdmin) {
+          // Qualified for Admin — send there
           stationMap.set(a.employee_id, adminStation.id);
+        } else {
+          // Not qualified for Admin — place at best bench station (least staffed, under max)
+          const benchQuals = getBenchQuals(a.employee_id);
+          let bestSid = -1;
+          let bestNeed = -Infinity;
+          for (const sid of benchQuals) {
+            const station = realStations.find(s => s.id === sid);
+            if (!station) continue;
+            const current = [...stationMap.values()].filter(v => v === sid).length;
+            const maxAllowed = station.max_staff ?? 99;
+            if (current >= maxAllowed) continue;
+            const need = getMinStaff(station, shiftName) - current;
+            if (need > bestNeed) { bestNeed = need; bestSid = sid; }
+          }
+          if (bestSid >= 0) {
+            stationMap.set(a.employee_id, bestSid);
+          } else if (adminStation) {
+            // Last resort: Admin even without qualification (shouldn't happen)
+            stationMap.set(a.employee_id, adminStation.id);
+          }
         }
       }
     }
@@ -1703,7 +1843,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         layer4_clsRotation(pool, locked, stationMap, rotHistory, lastWeekStation, weekStationThisWeek, shiftName, passIdx);
         layer5_shaynaFill(pool, locked, stationMap, shiftName);
         layer6_perDiemFill(pool, locked, stationMap, shiftName);
-        layer7_overflow(pool, locked, stationMap);
+        layer7_overflow(pool, locked, stationMap, shiftName);
+        // Run gap-fill last — after everyone is placed, reshuffle to fix remaining understaffing
+        gapFill(pool, locked, stationMap, shiftName);
 
         // Apply station assignments to the result assignments
         for (const a of group) {
