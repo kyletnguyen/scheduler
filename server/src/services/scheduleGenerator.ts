@@ -1627,20 +1627,108 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           }
         }
 
-        // Step 2: Pull Admin-parked non-admins (like Shayna) for staffing gaps
+        // Step 1b: Before pulling admin-parked employees, try moving bench MLTs
+        // from overstaffed stations to understaffed ones. This avoids pulling
+        // admin-parked employees (like Shayna) when regular MLTs can cover.
         for (const station of realStations) {
           const minNeeded = getMinNeeded(station);
           const maxAllowed = getMaxNeeded(station);
           let currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
           while (currentStaff < minNeeded && currentStaff < maxAllowed) {
-            const candidate = dailyGroup.find(a =>
-              adminStation && a.station_id === adminStation.id &&
-              empRoleMap.get(a.employee_id) !== 'admin' &&
-              empStationMap.get(a.employee_id)!.includes(station.id)
-            );
-            if (!candidate) break;
-            candidate.station_id = station.id;
+            // Find an MLT at an overstaffed station who can work here
+            const donor = dailyGroup.find(a => {
+              if (a.station_id === station.id) return false;
+              if (!empStationMap.get(a.employee_id)!.includes(station.id)) return false;
+              if (empRoleMap.get(a.employee_id) === 'admin') return false;
+              if (adminStation && a.station_id === adminStation.id) return false; // handled later
+              const theirStation = realStations.find(s => s.id === a.station_id);
+              if (!theirStation) return false;
+              const theirMin = getMinNeeded(theirStation);
+              const theirCurrent = dailyGroup.filter(x => x.station_id === a.station_id).length;
+              return theirCurrent > theirMin; // only from overstaffed
+            });
+            if (!donor) break;
+            donor.station_id = station.id;
             currentStaff++;
+          }
+        }
+
+        // Step 2: Pull Admin-parked non-admins (like Shayna) for staffing gaps
+        // These employees are last-resort fillers — only pull them when no other
+        // MLT at a bench station can cover the gap. Prefer their specialty station.
+        // Sort stations so we fill the admin-parked employee's preferred bench station first.
+        const adminParkedCandidates = adminStation ? dailyGroup.filter(a =>
+          a.station_id === adminStation.id &&
+          empRoleMap.get(a.employee_id) !== 'admin'
+        ) : [];
+        if (adminParkedCandidates.length > 0) {
+          // Sort stations: prefer the candidate's higher-priority qualified stations
+          const stationsNeedingStaff = realStations
+            .filter(station => {
+              const minNeeded = getMinNeeded(station);
+              const currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
+              return currentStaff < minNeeded;
+            })
+            .sort((a, b) => {
+              // For each station, find the best-priority admin-parked candidate
+              const aPrio = Math.min(...adminParkedCandidates
+                .filter(c => empStationMap.get(c.employee_id)!.includes(a.id))
+                .map(c => {
+                  const quals = empStationMap.get(c.employee_id)!.filter(sid => sid !== adminStation!.id);
+                  return quals.indexOf(a.id);
+                })
+                .filter(i => i >= 0), 99);
+              const bPrio = Math.min(...adminParkedCandidates
+                .filter(c => empStationMap.get(c.employee_id)!.includes(b.id))
+                .map(c => {
+                  const quals = empStationMap.get(c.employee_id)!.filter(sid => sid !== adminStation!.id);
+                  return quals.indexOf(b.id);
+                })
+                .filter(i => i >= 0), 99);
+              return aPrio - bPrio; // lower index = higher priority station for them
+            });
+
+          for (const station of stationsNeedingStaff) {
+            const minNeeded = getMinNeeded(station);
+            const maxAllowed = getMaxNeeded(station);
+            let currentStaff = dailyGroup.filter(a => a.station_id === station.id).length;
+            while (currentStaff < minNeeded && currentStaff < maxAllowed) {
+              // Pick the candidate whose highest-priority bench station matches this one
+              const candidate = adminParkedCandidates.find(a =>
+                a.station_id === adminStation!.id &&
+                empStationMap.get(a.employee_id)!.includes(station.id)
+              );
+              if (!candidate) break;
+              candidate.station_id = station.id;
+              currentStaff++;
+            }
+          }
+        }
+
+        // Step 2b: Swap admin-parked employees to their preferred bench station.
+        // If Shayna ended up at Micro but prefers Hema, and there's an MLT at Hema
+        // who can also do Micro, swap them so Shayna goes to her preferred station.
+        for (const ap of adminParkedCandidates) {
+          if (adminStation && ap.station_id === adminStation.id) continue; // still at Admin, skip
+          const empId = ap.employee_id;
+          const currentSid = ap.station_id!;
+          if (!currentSid) continue;
+          const benchQuals = empStationMap.get(empId)!.filter(sid => !adminStation || sid !== adminStation.id);
+          const preferredSid = benchQuals[0]; // their #1 bench station
+          if (!preferredSid || preferredSid === currentSid) continue; // already at preferred
+
+          // Find someone at the preferred station who can cover where Shayna currently is
+          const swapTarget = dailyGroup.find(a => {
+            if (a.station_id !== preferredSid) return false;
+            if (a.employee_id === empId) return false;
+            if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
+            // Don't swap admin-role employees off their assigned station
+            if (empRoleMap.get(a.employee_id) === 'admin') return false;
+            return true;
+          });
+          if (swapTarget) {
+            ap.station_id = preferredSid;
+            swapTarget.station_id = currentSid;
           }
         }
 
@@ -1765,6 +1853,28 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                       break;
                     }
                   }
+                  // After pulling admin-parked MLT, try swapping to their preferred bench station
+                  if (relocated || stationCount < stationMax) {
+                    const pulledMLT = adminMLTs[0];
+                    const pulledBenchQuals = empStationMap.get(pulledMLT.employee_id)!
+                      .filter(sid => !adminStation || sid !== adminStation.id);
+                    const pulledPreferred = pulledBenchQuals[0];
+                    if (pulledPreferred && pulledMLT.station_id !== pulledPreferred) {
+                      // Find someone at their preferred station who can cover where they ended up
+                      const swapForPreferred = dailyGroup.find(a => {
+                        if (a.station_id !== pulledPreferred) return false;
+                        if (a.employee_id === pulledMLT.employee_id) return false;
+                        if (!empStationMap.get(a.employee_id)!.includes(pulledMLT.station_id!)) return false;
+                        if (empRoleMap.get(a.employee_id) === 'admin') return false;
+                        return true;
+                      });
+                      if (swapForPreferred) {
+                        const tempSid = pulledMLT.station_id;
+                        pulledMLT.station_id = pulledPreferred;
+                        swapForPreferred.station_id = tempSid;
+                      }
+                    }
+                  }
                   // Fallback: try swapping with someone who can go to Admin
                   if (!relocated) {
                     for (const adminMLT of adminMLTs) {
@@ -1823,6 +1933,26 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               backfillMLT.station_id = otherStation.id;
               const idx = adminParkedMLTs.indexOf(backfillMLT);
               if (idx >= 0) adminParkedMLTs.splice(idx, 1);
+
+              // If the backfill MLT ended up at a non-preferred bench station, try swapping
+              const bfBenchQuals = empStationMap.get(backfillMLT.employee_id)!
+                .filter(sid => !adminStation || sid !== adminStation.id);
+              const bfPreferred = bfBenchQuals[0];
+              if (bfPreferred && backfillMLT.station_id !== bfPreferred) {
+                const bfSwap = dailyGroup.find(a => {
+                  if (a.station_id !== bfPreferred) return false;
+                  if (a.employee_id === backfillMLT.employee_id) return false;
+                  if (!empStationMap.get(a.employee_id)!.includes(backfillMLT.station_id!)) return false;
+                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
+                  return true;
+                });
+                if (bfSwap) {
+                  const tmpSid = backfillMLT.station_id;
+                  backfillMLT.station_id = bfPreferred;
+                  bfSwap.station_id = tmpSid;
+                }
+              }
+
               break;
             }
             if (dailyGroup.filter(a => a.station_id === needyStation.id)
@@ -2021,6 +2151,39 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             // MLTs should never go to Admin — if no needy station, they stay where they are
             // (2 MLTs at same station is less bad than an MLT on Admin)
+          }
+        }
+      }
+
+      // Final sweep: admin-parked employees (like Shayna) should be at their
+      // preferred bench station whenever possible. If they ended up at a non-preferred
+      // station through any code path (Step 2, 3, 4, etc.), swap them with someone
+      // at their preferred station who can cover the non-preferred one.
+      if (adminStation) {
+        for (const dailyGroup of dailyGroups) {
+          const adminParked = dailyGroup.filter(a => {
+            const quals = empStationMap.get(a.employee_id);
+            return quals && quals[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
+          });
+          for (const ap of adminParked) {
+            if (ap.station_id === adminStation.id) continue; // at Admin, fine
+            const currentSid = ap.station_id!;
+            if (!currentSid) continue;
+            const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
+            const preferredSid = benchQuals[0];
+            if (!preferredSid || preferredSid === currentSid) continue;
+
+            const swapTarget = dailyGroup.find(a => {
+              if (a.station_id !== preferredSid) return false;
+              if (a.employee_id === ap.employee_id) return false;
+              if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
+              if (empRoleMap.get(a.employee_id) === 'admin') return false;
+              return true;
+            });
+            if (swapTarget) {
+              ap.station_id = preferredSid;
+              swapTarget.station_id = currentSid;
+            }
           }
         }
       }
