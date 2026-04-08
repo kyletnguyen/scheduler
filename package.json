@@ -26,6 +26,7 @@
       "output": "dist-electron"
     },
     "npmRebuild": false,
+    "publish": null,
     "files": [
       "electron/**/*"
     ],
