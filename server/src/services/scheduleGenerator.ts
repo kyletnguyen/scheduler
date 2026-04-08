@@ -971,17 +971,24 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   };
 
   // Helper: get min staff for a station on a given shift
-  const getMinStaff = (station: Station, shiftName: string): number => {
+  // min_staff_am/pm/night = number of CLS needed for that shift
+  const getCLSNeeded = (station: Station, shiftName: string): number => {
     if (shiftName === 'am') return (station as any).min_staff_am ?? station.min_staff ?? 1;
     if (shiftName === 'pm') return (station as any).min_staff_pm ?? station.min_staff ?? 1;
     if (shiftName === 'night') return (station as any).min_staff_night ?? station.min_staff ?? 1;
     return station.min_staff ?? 1;
   };
-  // Max CLS at a station = max_staff minus MLT slots (min_mlt). E.g., Micro max 3 with 1 MLT → 2 CLS max.
-  const getMaxCLS = (station: Station): number => {
-    const maxStaff = station.max_staff ?? 99;
-    const minMLT = (station as any).min_mlt ?? 0;
-    return maxStaff - minMLT;
+  // MLT slots: 1 if station allows MLTs (require_cls=1), 0 otherwise
+  const getMLTSlots = (station: Station): number => {
+    return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+  };
+  // Total staff = CLS needed + MLT slots
+  const getMinStaff = (station: Station, shiftName: string): number => {
+    return getCLSNeeded(station, shiftName) + getMLTSlots(station);
+  };
+  // Max CLS = CLS needed (exact, no overstaffing)
+  const getMaxCLS = (station: Station, shiftName: string): number => {
+    return getCLSNeeded(station, shiftName);
   };
 
   // Helper: count criticals + pivotals + rotation penalty for scoring passes
@@ -1007,7 +1014,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const shiftName = shfts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
       for (const station of realStns) {
         const minNeeded = getMinStaff(station, shiftName);
-        const maxAllowed = station.max_staff ?? 99;
+        const maxAllowed = getMinStaff(station, shiftName);
         const stationAssignees = group.filter(a => a.station_id === station.id);
 
         // Understaffed
@@ -1375,7 +1382,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const clsCount = [...stationMap.entries()].filter(([eid, s]) =>
             s === sid && isCLSRole(eid, empRoleMap)
           ).length;
-          const maxCLS = getMaxCLS(station);
+          const maxCLS = getMaxCLS(station, shiftName);
 
           // Hard block: CLS slots full
           if (clsCount >= maxCLS) continue;
@@ -1514,9 +1521,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         const targetSid = benchQuals[0];
         const targetStation = realStations.find(s => s.id === targetSid);
         if (targetStation) {
-          const maxAllowed = targetStation.max_staff ?? 99;
           const current = [...stationMap.values()].filter(v => v === targetSid).length;
-          if (current < maxAllowed) {
+          if (current < getMinStaff(targetStation, shiftName)) {
             stationMap.set(admin.employee_id, targetSid);
           }
         }
@@ -1719,7 +1725,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
             s === sid && isCLSRole(eid, empRoleMap)
           ).length;
-          const maxCLS = getMaxCLS(station);
+          const maxCLS = getMaxCLS(station, shiftName);
 
           // Place if understaffed and CLS slots available, or if station has no CLS at all
           if (clsHere < maxCLS && (currentStaff < minNeeded || (
@@ -1787,13 +1793,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const station = realStations.find(s => s.id === sid);
           if (!station) continue;
           const current = [...stationMap.values()].filter(v => v === sid).length;
-          const maxAllowed = station.max_staff ?? 99;
+          const maxAllowed = getMinStaff(station, shiftName);
           if (current >= maxAllowed) continue;
           // Respect role-specific caps (CLS can't exceed CLS slots, MLT can't exceed 1)
           if (isCLSRole(a.employee_id, empRoleMap)) {
             const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
               s === sid && isCLSRole(eid, empRoleMap)).length;
-            if (clsHere >= getMaxCLS(station)) continue;
+            if (clsHere >= getMaxCLS(station, shiftName)) continue;
           }
           if (empRole === 'mlt') {
             const mltsHere = [...stationMap.entries()].filter(([eid, s]) =>
@@ -1806,19 +1812,61 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         if (bestSid >= 0) {
           stationMap.set(a.employee_id, bestSid);
         } else {
-          // All role-specific slots full — assign to least-staffed qualified station anyway
-          // (everyone must have a station; over-cap generates a warning, not a gap)
-          let fallbackSid = -1;
-          let fallbackNeed = -Infinity;
-          for (const sid of benchQuals) {
-            const station = realStations.find(s => s.id === sid);
-            if (!station) continue;
-            const current = [...stationMap.values()].filter(v => v === sid).length;
-            const need = getMinStaff(station, shiftName) - current;
-            if (need > fallbackNeed) { fallbackNeed = need; fallbackSid = sid; }
+          // All role-specific slots full — try MLT swaps (count-neutral, no open slot needed)
+          if (empRole === 'mlt' && adminStation) {
+            // Strategy A: Replace an admin-parked MLT directly (they go back to Admin)
+            for (const sid of benchQuals) {
+              const apAtStation = [...stationMap.entries()].find(([eid, s]) =>
+                s === sid && empRoleMap.get(eid) === 'mlt' && isAdminParked(eid)
+              );
+              if (apAtStation) {
+                stationMap.set(apAtStation[0], adminStation.id);
+                stationMap.set(a.employee_id, sid);
+                break;
+              }
+            }
+
+            // Strategy B: Chain swap — replace MLT at station X, that MLT replaces
+            // admin-parked MLT at station Y who goes to Admin.
+            // e.g., Dennis→Chem (replacing Gaby), Gaby→Hema (replacing Shayna), Shayna→Admin
+            if (!stationMap.has(a.employee_id)) {
+              for (const sid of benchQuals) {
+                const mltHere = [...stationMap.entries()].find(([eid, s]) =>
+                  s === sid && empRoleMap.get(eid) === 'mlt' && eid !== a.employee_id
+                );
+                if (!mltHere) continue;
+                const [otherMLTId] = mltHere;
+                const otherQuals = getBenchQuals(otherMLTId);
+                for (const altSid of otherQuals) {
+                  if (altSid === sid) continue;
+                  const apAtAlt = [...stationMap.entries()].find(([eid, s]) =>
+                    s === altSid && empRoleMap.get(eid) === 'mlt' && isAdminParked(eid)
+                  );
+                  if (apAtAlt) {
+                    stationMap.set(apAtAlt[0], adminStation.id);
+                    stationMap.set(otherMLTId, altSid);
+                    stationMap.set(a.employee_id, sid);
+                    break;
+                  }
+                }
+                if (stationMap.has(a.employee_id)) break;
+              }
+            }
           }
-          if (fallbackSid >= 0) {
-            stationMap.set(a.employee_id, fallbackSid);
+          // Final fallback: if still unassigned, place at least-staffed station (generates warning)
+          if (!stationMap.has(a.employee_id)) {
+            let fallbackSid = -1;
+            let fallbackNeed = -Infinity;
+            for (const sid of benchQuals) {
+              const station = realStations.find(s => s.id === sid);
+              if (!station) continue;
+              const current = [...stationMap.values()].filter(v => v === sid).length;
+              const need = getMinStaff(station, shiftName) - current;
+              if (need > fallbackNeed) { fallbackNeed = need; fallbackSid = sid; }
+            }
+            if (fallbackSid >= 0) {
+              stationMap.set(a.employee_id, fallbackSid);
+            }
           }
         }
       }
@@ -1901,7 +1949,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         for (const station of realStations) {
           const stationAssignees = group.filter(a => a.station_id === station.id);
           const minNeeded = getMinStaff(station, shiftName);
-          const maxAllowed = station.max_staff ?? 99;
+          const maxAllowed = getMinStaff(station, shiftName);
 
           // CRITICAL: understaffed
           if (stationAssignees.length < minNeeded) {

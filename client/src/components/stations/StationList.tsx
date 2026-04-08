@@ -68,26 +68,31 @@ export default function StationList() {
           <thead className="bg-gray-50 border-b">
             <tr>
               <th className="text-left px-4 py-3 font-medium text-gray-600">Station Name</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">Max Staff</th>
               <th className="text-center px-2 py-3 font-medium text-amber-600">
                 <div className="leading-tight">
-                  <div className="text-[10px]">Min Staff</div>
+                  <div className="text-[10px]">CLS Needed</div>
                   <div>AM</div>
                 </div>
               </th>
               <th className="text-center px-2 py-3 font-medium text-indigo-600">
                 <div className="leading-tight">
-                  <div className="text-[10px]">Min Staff</div>
+                  <div className="text-[10px]">CLS Needed</div>
                   <div>PM</div>
                 </div>
               </th>
               <th className="text-center px-2 py-3 font-medium text-gray-600">
                 <div className="leading-tight">
-                  <div className="text-[10px]">Min Staff</div>
+                  <div className="text-[10px]">CLS Needed</div>
                   <div>Night</div>
                 </div>
               </th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">Allows MLT</th>
+              <th className="text-center px-3 py-3 font-medium text-gray-500">
+                <div className="leading-tight">
+                  <div className="text-[10px]">Total</div>
+                  <div>AM</div>
+                </div>
+              </th>
               <th className="text-right px-4 py-3 font-medium text-gray-600">Actions</th>
             </tr>
           </thead>
@@ -97,18 +102,6 @@ export default function StationList() {
                 <td className="px-4 py-3">
                   <div>
                     <span className="font-medium text-gray-900">{station.name}</span>
-                    <div className="text-[10px] text-gray-400 mt-0.5">Requires at least 1 CLS/Admin</div>
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex items-center justify-center">
-                    <input
-                      type="number"
-                      min={1}
-                      value={station.max_staff}
-                      onChange={(e) => handleUpdate(station.id, station.name, 'max_staff', Number(e.target.value))}
-                      className="w-14 border rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
                   </div>
                 </td>
                 <td className="px-2 py-3">
@@ -116,7 +109,7 @@ export default function StationList() {
                     <input
                       type="number"
                       min={0}
-                      max={station.max_staff || 10}
+                      max={10}
                       value={station.min_staff_am}
                       onChange={(e) => handleUpdate(station.id, station.name, 'min_staff_am', Number(e.target.value))}
                       className="w-14 border border-amber-200 rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-amber-400"
@@ -128,7 +121,7 @@ export default function StationList() {
                     <input
                       type="number"
                       min={0}
-                      max={station.max_staff || 10}
+                      max={10}
                       value={station.min_staff_pm}
                       onChange={(e) => handleUpdate(station.id, station.name, 'min_staff_pm', Number(e.target.value))}
                       className="w-14 border border-indigo-200 rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-indigo-400"
@@ -140,7 +133,7 @@ export default function StationList() {
                     <input
                       type="number"
                       min={0}
-                      max={station.max_staff || 10}
+                      max={10}
                       value={station.min_staff_night}
                       onChange={(e) => handleUpdate(station.id, station.name, 'min_staff_night', Number(e.target.value))}
                       className="w-14 border rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-gray-400"
@@ -158,6 +151,11 @@ export default function StationList() {
                   >
                     {station.require_cls ? 'Yes — MLTs allowed' : 'No — CLS only'}
                   </button>
+                </td>
+                <td className="px-3 py-3 text-center">
+                  <span className="text-xs text-gray-500">
+                    {station.min_staff_am + (station.require_cls ? 1 : 0)}
+                  </span>
                 </td>
                 <td className="px-4 py-3 text-right">
                   <button
