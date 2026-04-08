@@ -1,8 +1,8 @@
-import { Router } from 'express';
+import { Router, type IRouter } from 'express';
 import { z } from 'zod';
 import db from '../db/connection.js';
 
-const router = Router();
+const router: IRouter = Router();
 
 const shiftUpdateSchema = z.object({
   start_time: z.string().regex(/^\d{2}:\d{2}$/),

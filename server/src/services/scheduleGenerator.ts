@@ -2195,32 +2195,192 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
-      // Final sweep: admin-parked employees (like Shayna) should be at their
-      // preferred bench station whenever possible. If they ended up at a non-preferred
-      // station through any code path (Step 2, 3, 4, etc.), swap them with someone
-      // at their preferred station who can cover the non-preferred one.
-      // Supports chain swaps: e.g. Shayna(Micro)→Hema, Gaby(Hema)→Chem, Dennis(Chem)→Micro
+      // ── Post-assignment fixups ──
+      // Order: admin supersession → 1-MLT enforcement → CLS rebalance
+      // All swaps must respect: max 1 MLT per bench station.
+
       if (adminStation) {
         for (const dailyGroup of dailyGroups) {
-          const adminParked = dailyGroup.filter(a => {
-            const quals = empStationMap.get(a.employee_id);
-            return quals && quals[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
+          // Helper: count MLTs at a station
+          const mltCountAt = (sid: number) =>
+            dailyGroup.filter(a => a.station_id === sid && empRoleMap.get(a.employee_id) === 'mlt').length;
+          const countAt = (sid: number) => dailyGroup.filter(a => a.station_id === sid).length;
+
+          // ── A. Admin supersession: Shayna replaces Jethro on bench ──
+          const adminParkedAtAdmin = dailyGroup.filter(a => {
+            const q = empStationMap.get(a.employee_id);
+            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin'
+              && a.station_id === adminStation.id;
           });
-          for (const ap of adminParked) {
-            if (ap.station_id === adminStation.id) continue; // at Admin, fine
+          for (const ap of adminParkedAtAdmin) {
+            const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
+            for (const preferredSid of benchQuals) {
+              // Only place if it won't create 2 MLTs
+              if (mltCountAt(preferredSid) >= 1) continue;
+              const adminOnBench = dailyGroup.find(a =>
+                a.station_id === preferredSid
+                && empRoleMap.get(a.employee_id) === 'admin'
+                && empStationMap.get(a.employee_id)!.includes(adminStation.id)
+              );
+              if (adminOnBench) {
+                ap.station_id = preferredSid;
+                adminOnBench.station_id = adminStation.id;
+                break;
+              }
+            }
+          }
+
+          // ── B. Enforce max 1 MLT per bench station ──
+          // Repeat until stable (max 30 iterations for safety)
+          for (let iter = 0; iter < 30; iter++) {
+            let anyFixed = false;
+            for (const station of realStations) {
+              if (station.id === adminStation.id) continue;
+              const assignees = dailyGroup.filter(a => a.station_id === station.id);
+              const mlts = assignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt');
+              if (mlts.length < 2) continue;
+              if (assignees.length <= (station.min_staff ?? 1)) continue; // can't reduce below min
+
+              // Sort MLTs to try: admin-parked first, then per-diem, then most-flexible last
+              const sortedMLTs = [...mlts].sort((a, b) => {
+                const aAP = empStationMap.get(a.employee_id)![0] === adminStation.id ? 0 : 1;
+                const bAP = empStationMap.get(b.employee_id)![0] === adminStation.id ? 0 : 1;
+                if (aAP !== bAP) return aAP - bAP;
+                const aPD = employees.find(e => e.id === a.employee_id)?.employment_type === 'per-diem' ? 0 : 1;
+                const bPD = employees.find(e => e.id === b.employee_id)?.employment_type === 'per-diem' ? 0 : 1;
+                if (aPD !== bPD) return aPD - bPD;
+                // More qualifications = more flexible = try first
+                return empStationMap.get(b.employee_id)!.length - empStationMap.get(a.employee_id)!.length;
+              });
+
+              let done = false;
+              for (const toMove of sortedMLTs) {
+                if (done) break;
+                const quals = empStationMap.get(toMove.employee_id)!;
+
+                // Strategy 1: move to a bench station that has 0 MLTs and room
+                for (const target of realStations) {
+                  if (target.id === station.id || target.id === adminStation.id) continue;
+                  if (!quals.includes(target.id)) continue;
+                  if (mltCountAt(target.id) >= 1) continue;
+                  const tCount = countAt(target.id);
+                  const tMax = (target as any).max_staff ?? 99;
+                  if (tCount >= tMax) continue;
+                  toMove.station_id = target.id;
+                  done = true;
+                  break;
+                }
+                if (done) break;
+
+                // Strategy 2: swap with a CLS at another station
+                for (const other of realStations) {
+                  if (other.id === station.id || other.id === adminStation.id) continue;
+                  if (!quals.includes(other.id)) continue;
+                  if (mltCountAt(other.id) >= 1) continue;
+                  const swapCLS = dailyGroup.find(a =>
+                    a.station_id === other.id && empRoleMap.get(a.employee_id) === 'cls'
+                    && empStationMap.get(a.employee_id)!.includes(station.id)
+                  );
+                  if (swapCLS) {
+                    toMove.station_id = other.id;
+                    swapCLS.station_id = station.id;
+                    done = true;
+                    break;
+                  }
+                }
+                if (done) break;
+
+                // Strategy 3: displace an admin-parked employee → Admin
+                for (const other of realStations) {
+                  if (other.id === station.id || other.id === adminStation.id) continue;
+                  if (!quals.includes(other.id)) continue;
+                  const ap = dailyGroup.find(a => {
+                    if (a.station_id !== other.id) return false;
+                    const q = empStationMap.get(a.employee_id);
+                    return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin';
+                  });
+                  if (!ap) continue;
+                  const apIsMLT = empRoleMap.get(ap.employee_id) === 'mlt';
+                  const resultMLTs = mltCountAt(other.id) - (apIsMLT ? 1 : 0) + 1;
+                  if (resultMLTs > 1) continue;
+                  toMove.station_id = other.id;
+                  ap.station_id = adminStation.id;
+                  done = true;
+                  break;
+                }
+                if (done) break;
+
+                // Strategy 4: if admin-parked, send back to Admin
+                if (quals[0] === adminStation.id) {
+                  toMove.station_id = adminStation.id;
+                  done = true;
+                }
+              }
+
+              if (done) anyFixed = true;
+            }
+            if (!anyFixed) break;
+          }
+
+          // ── C. CLS rebalance: stations with require_cls=1 need ≥1 CLS ──
+          for (const station of realStations) {
+            if (station.require_cls !== 1) continue;
+            const assignees = dailyGroup.filter(a => a.station_id === station.id);
+            if (assignees.length === 0) continue;
+            if (assignees.some(a => empRoleMap.get(a.employee_id) === 'cls')) continue;
+
+            const mltHere = assignees.find(a => empRoleMap.get(a.employee_id) === 'mlt');
+            if (!mltHere) continue;
+
+            for (const other of realStations) {
+              if (other.id === station.id) continue;
+              const otherCLS = dailyGroup.filter(a =>
+                a.station_id === other.id && empRoleMap.get(a.employee_id) === 'cls'
+              );
+              const otherNeedsCLS = other.require_cls === 1;
+              if (otherNeedsCLS && otherCLS.length <= 1) continue;
+              if (otherCLS.length < 1) continue;
+
+              const cls = otherCLS.find(c =>
+                empStationMap.get(c.employee_id)!.includes(station.id)
+                && empStationMap.get(mltHere.employee_id)!.includes(other.id)
+              );
+              if (cls) {
+                // Only swap if it won't create 2 MLTs at the other station
+                if (mltCountAt(other.id) >= 1) continue;
+                cls.station_id = station.id;
+                mltHere.station_id = other.id;
+                break;
+              }
+            }
+          }
+
+          // ── D. Shayna preference: if she's on bench but not at #1, swap ──
+          // Only if it won't violate 1-MLT rule
+          const adminParkedOnBench = dailyGroup.filter(a => {
+            const q = empStationMap.get(a.employee_id);
+            return q && q[0] === adminStation.id && empRoleMap.get(a.employee_id) !== 'admin'
+              && a.station_id !== adminStation.id;
+          });
+          for (const ap of adminParkedOnBench) {
             const currentSid = ap.station_id!;
             if (!currentSid) continue;
             const benchQuals = empStationMap.get(ap.employee_id)!.filter(sid => sid !== adminStation.id);
             const preferredSid = benchQuals[0];
             if (!preferredSid || preferredSid === currentSid) continue;
 
-            // Try direct swap first
+            // Direct swap — only if it doesn't create 2 MLTs at either station
             const directSwap = dailyGroup.find(a => {
               if (a.station_id !== preferredSid) return false;
               if (a.employee_id === ap.employee_id) return false;
               if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
               if (empRoleMap.get(a.employee_id) === 'admin') return false;
-              return true;
+              // After swap: ap(MLT) goes to preferred, other goes to current
+              // Check 1-MLT: at preferred, remove other + add ap(MLT) = mltCount - (other is MLT?1:0) + 1
+              const otherIsMLT = empRoleMap.get(a.employee_id) === 'mlt';
+              const prefMLTs = mltCountAt(preferredSid) - (otherIsMLT ? 1 : 0) + 1;
+              const curMLTs = mltCountAt(currentSid) - 1 + (otherIsMLT ? 1 : 0);
+              return prefMLTs <= 1 && curMLTs <= 1;
             });
             if (directSwap) {
               ap.station_id = preferredSid;
@@ -2228,21 +2388,16 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               continue;
             }
 
-            // Chain swap: find someone at preferred station who can go to a 3rd station,
-            // and someone at that 3rd station who can cover where Shayna currently is.
-            // e.g. Shayna(Micro)→Hema, Gaby(Hema)→Chem, Dennis(Chem)→Micro
+            // Chain swap (3-way) — only if result has ≤1 MLT everywhere
             const atPreferred = dailyGroup.filter(a =>
-              a.station_id === preferredSid &&
-              a.employee_id !== ap.employee_id &&
-              empRoleMap.get(a.employee_id) !== 'admin'
+              a.station_id === preferredSid && a.employee_id !== ap.employee_id
+              && empRoleMap.get(a.employee_id) !== 'admin'
             );
             let chained = false;
             for (const middle of atPreferred) {
-              // Where can the middle person go?
               const middleQuals = empStationMap.get(middle.employee_id)!
                 .filter(sid => sid !== preferredSid && sid !== adminStation.id);
               for (const thirdSid of middleQuals) {
-                // Find someone at thirdSid who can do currentSid (where Shayna is now)
                 const tail = dailyGroup.find(a => {
                   if (a.station_id !== thirdSid) return false;
                   if (a.employee_id === ap.employee_id || a.employee_id === middle.employee_id) return false;
@@ -2250,13 +2405,19 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                   if (empRoleMap.get(a.employee_id) === 'admin') return false;
                   return true;
                 });
-                if (tail) {
-                  ap.station_id = preferredSid;
-                  middle.station_id = thirdSid;
-                  tail.station_id = currentSid;
-                  chained = true;
-                  break;
-                }
+                if (!tail) continue;
+                // Simulate: ap→preferred, middle→third, tail→current
+                const midIsMLT = empRoleMap.get(middle.employee_id) === 'mlt';
+                const tailIsMLT = empRoleMap.get(tail.employee_id) === 'mlt';
+                const prefMLTs = mltCountAt(preferredSid) - (midIsMLT ? 1 : 0) + 1;
+                const thirdMLTs = mltCountAt(thirdSid) + (midIsMLT ? 1 : 0) - (tailIsMLT ? 1 : 0);
+                const curMLTs = mltCountAt(currentSid) - 1 + (tailIsMLT ? 1 : 0);
+                if (prefMLTs > 1 || thirdMLTs > 1 || curMLTs > 1) continue;
+                ap.station_id = preferredSid;
+                middle.station_id = thirdSid;
+                tail.station_id = currentSid;
+                chained = true;
+                break;
               }
               if (chained) break;
             }

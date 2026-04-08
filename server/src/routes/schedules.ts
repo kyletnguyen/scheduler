@@ -1,9 +1,9 @@
-import { Router } from 'express';
+import { Router, type IRouter } from 'express';
 import { z } from 'zod';
 import db from '../db/connection.js';
 import { generateSchedule, analyzeSchedule } from '../services/scheduleGenerator.js';
 
-const router = Router();
+const router: IRouter = Router();
 
 const assignmentSchema = z.object({
   employee_id: z.number().int().positive(),

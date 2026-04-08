@@ -1,8 +1,8 @@
-import { Router } from 'express';
+import { Router, type IRouter } from 'express';
 import { z } from 'zod';
 import db from '../db/connection.js';
 
-const router = Router();
+const router: IRouter = Router();
 
 const employeeSchema = z.object({
   name: z.string().min(1),
