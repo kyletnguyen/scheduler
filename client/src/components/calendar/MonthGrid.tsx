@@ -781,8 +781,13 @@ export default function MonthGrid() {
                 )}
                 <tr className="hover:bg-blue-50/40 border-b border-gray-200">
                   <td className="sticky left-0 bg-white z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px]">
-                    <div className="flex items-center gap-1.5">
-                      <span>{emp.name}</span>
+                    <div className="flex items-center gap-1.5 relative">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setEmployeeDetail(employeeDetail === emp.id ? null : emp.id); }}
+                        className="hover:text-blue-600 hover:underline transition-colors text-left font-semibold"
+                      >
+                        {emp.name}
+                      </button>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${
                         emp.role === 'admin' ? 'bg-orange-100 text-orange-700' :
                         emp.role === 'mlt' ? 'bg-cyan-100 text-cyan-700' :
@@ -790,6 +795,45 @@ export default function MonthGrid() {
                       }`}>
                         {emp.role}
                       </span>
+                      {employeeDetail === emp.id && (() => {
+                        const empSchedule = assignments.filter(a => a.employee_id === emp.id);
+                        const stationCounts: Record<string, number> = {};
+                        for (const a of empSchedule) {
+                          const s = a.station_name || 'Unassigned';
+                          stationCounts[s] = (stationCounts[s] || 0) + 1;
+                        }
+                        const sorted = Object.entries(stationCounts).sort(([,a],[,b]) => b - a);
+                        return (
+                          <div
+                            className="absolute left-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-50 min-w-[220px]"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="text-xs font-bold text-gray-700 mb-2">
+                              {emp.name} — {empSchedule.length} day{empSchedule.length !== 1 ? 's' : ''} this month
+                            </div>
+                            {sorted.length > 0 ? (
+                              <div className="space-y-1">
+                                {sorted.map(([station, count]) => {
+                                  const sd = getStationDisplay(station);
+                                  const pct = empSchedule.length > 0 ? Math.round(count / empSchedule.length * 100) : 0;
+                                  return (
+                                    <div key={station} className="flex items-center gap-2 text-xs">
+                                      <span className={`${sd.bg} text-white text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0`}>
+                                        {sd.abbr}
+                                      </span>
+                                      <span className="text-gray-700 flex-1">{station}</span>
+                                      <span className="font-semibold text-gray-900">{count}d</span>
+                                      <span className="text-gray-400 text-[10px] w-8 text-right">{pct}%</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="text-xs text-gray-400 italic">No schedule data</div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </td>
                   {days.map((day) => {
@@ -1156,45 +1200,12 @@ export default function MonthGrid() {
                                   const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
                                     : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
                                     : 'bg-blue-100 text-blue-700';
-                                  const isExpanded = employeeDetail === a.employee_id;
-                                  // Build monthly stats for this employee
-                                  const empAssignments = isExpanded ? assignments.filter(x => x.employee_id === a.employee_id) : [];
-                                  const stationCounts: Record<string, number> = {};
-                                  for (const x of empAssignments) {
-                                    const s = x.station_name || 'Unassigned';
-                                    stationCounts[s] = (stationCounts[s] || 0) + 1;
-                                  }
                                   return (
-                                    <div key={a.id}>
-                                      <div
-                                        className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm cursor-pointer hover:bg-gray-100 transition-colors"
-                                        onClick={() => setEmployeeDetail(isExpanded ? null : a.employee_id)}
-                                      >
-                                        <span className="font-medium text-gray-800">{a.employee_name}</span>
-                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
-                                          {empInfo?.role ?? '?'}
-                                        </span>
-                                        <span className="text-[10px] text-gray-400 ml-auto">{empAssignments.length || ''} {isExpanded ? '\u25B2' : '\u25BC'}</span>
-                                      </div>
-                                      {isExpanded && (
-                                        <div className="ml-4 mt-1 mb-2 px-3 py-2 bg-blue-50 rounded text-xs space-y-1.5">
-                                          <div className="font-semibold text-gray-700">
-                                            {empAssignments.length} day{empAssignments.length !== 1 ? 's' : ''} this month
-                                          </div>
-                                          <div className="flex flex-wrap gap-1.5">
-                                            {Object.entries(stationCounts)
-                                              .sort(([,a],[,b]) => b - a)
-                                              .map(([station, count]) => {
-                                                const sd = getStationDisplay(station);
-                                                return (
-                                                  <span key={station} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${sd.bg} text-white text-[10px] font-semibold`}>
-                                                    {sd.abbr} {count}d
-                                                  </span>
-                                                );
-                                              })}
-                                          </div>
-                                        </div>
-                                      )}
+                                    <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
+                                      <span className="font-medium text-gray-800">{a.employee_name}</span>
+                                      <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
+                                        {empInfo?.role ?? '?'}
+                                      </span>
                                     </div>
                                   );
                                 })}

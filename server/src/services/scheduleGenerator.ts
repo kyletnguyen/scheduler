@@ -2159,6 +2159,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       // preferred bench station whenever possible. If they ended up at a non-preferred
       // station through any code path (Step 2, 3, 4, etc.), swap them with someone
       // at their preferred station who can cover the non-preferred one.
+      // Supports chain swaps: e.g. Shayna(Micro)→Hema, Gaby(Hema)→Chem, Dennis(Chem)→Micro
       if (adminStation) {
         for (const dailyGroup of dailyGroups) {
           const adminParked = dailyGroup.filter(a => {
@@ -2173,16 +2174,51 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const preferredSid = benchQuals[0];
             if (!preferredSid || preferredSid === currentSid) continue;
 
-            const swapTarget = dailyGroup.find(a => {
+            // Try direct swap first
+            const directSwap = dailyGroup.find(a => {
               if (a.station_id !== preferredSid) return false;
               if (a.employee_id === ap.employee_id) return false;
               if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
               if (empRoleMap.get(a.employee_id) === 'admin') return false;
               return true;
             });
-            if (swapTarget) {
+            if (directSwap) {
               ap.station_id = preferredSid;
-              swapTarget.station_id = currentSid;
+              directSwap.station_id = currentSid;
+              continue;
+            }
+
+            // Chain swap: find someone at preferred station who can go to a 3rd station,
+            // and someone at that 3rd station who can cover where Shayna currently is.
+            // e.g. Shayna(Micro)→Hema, Gaby(Hema)→Chem, Dennis(Chem)→Micro
+            const atPreferred = dailyGroup.filter(a =>
+              a.station_id === preferredSid &&
+              a.employee_id !== ap.employee_id &&
+              empRoleMap.get(a.employee_id) !== 'admin'
+            );
+            let chained = false;
+            for (const middle of atPreferred) {
+              // Where can the middle person go?
+              const middleQuals = empStationMap.get(middle.employee_id)!
+                .filter(sid => sid !== preferredSid && sid !== adminStation.id);
+              for (const thirdSid of middleQuals) {
+                // Find someone at thirdSid who can do currentSid (where Shayna is now)
+                const tail = dailyGroup.find(a => {
+                  if (a.station_id !== thirdSid) return false;
+                  if (a.employee_id === ap.employee_id || a.employee_id === middle.employee_id) return false;
+                  if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
+                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
+                  return true;
+                });
+                if (tail) {
+                  ap.station_id = preferredSid;
+                  middle.station_id = thirdSid;
+                  tail.station_id = currentSid;
+                  chained = true;
+                  break;
+                }
+              }
+              if (chained) break;
             }
           }
         }
