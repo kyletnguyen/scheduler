@@ -420,6 +420,23 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
               }
             }
           }
+          // Check CLS coverage for stations that require it
+          if (station.require_cls === 1) {
+            const hasCLS = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
+            if (!hasCLS) {
+              const dow = getDow(group[0].date);
+              const isWeekend = dow === 0 || dow === 6;
+              const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
+              let suppress = false;
+              if (isWeekend && isHemaOrChem) {
+                suppress = true;
+              }
+              if (!suppress) {
+                const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
+                warnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
+              }
+            }
+          }
         }
       }
     }
@@ -2535,6 +2552,21 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                 if (!suppressMLTWarning) {
                   const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
                   passWarnings.push(`PIVOTAL: ${station.name} has no MLT assigned on ${date} (${shiftName})`);
+                }
+              }
+            }
+            // Check CLS coverage
+            if (station.require_cls === 1) {
+              const hasCLS = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'cls');
+              if (!hasCLS) {
+                const dow = getDow(date);
+                const isWeekend = dow === 0 || dow === 6;
+                const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
+                let suppress = false;
+                if (isWeekend && isHemaOrChem) suppress = true;
+                if (!suppress) {
+                  const shiftName = shifts.find(s => s.id === shiftIdNum)?.name ?? 'Unknown';
+                  passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftName})`);
                 }
               }
             }
