@@ -977,6 +977,12 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     if (shiftName === 'night') return (station as any).min_staff_night ?? station.min_staff ?? 1;
     return station.min_staff ?? 1;
   };
+  // Max CLS at a station = max_staff minus MLT slots (min_mlt). E.g., Micro max 3 with 1 MLT → 2 CLS max.
+  const getMaxCLS = (station: Station): number => {
+    const maxStaff = station.max_staff ?? 99;
+    const minMLT = (station as any).min_mlt ?? 0;
+    return maxStaff - minMLT;
+  };
 
   // Helper: count criticals + pivotals + rotation penalty for scoring passes
   const scorePass = (
@@ -1365,10 +1371,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           const current = stationCount.get(sid) ?? 0;
           const minNeeded = getMinStaff(station, shiftName);
-          const maxAllowed = station.max_staff ?? 99;
+          // CLS cap: reserve MLT slots (e.g., Micro max 3 with 1 MLT = 2 CLS max)
+          const clsCount = [...stationMap.entries()].filter(([eid, s]) =>
+            s === sid && isCLSRole(eid, empRoleMap)
+          ).length;
+          const maxCLS = getMaxCLS(station);
 
-          // Hard block: at max
-          if (current >= maxAllowed) continue;
+          // Hard block: CLS slots full
+          if (clsCount >= maxCLS) continue;
 
           let score = 0;
 
@@ -1706,13 +1716,16 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           const currentStaff = [...stationMap.values()].filter(s => s === sid).length;
           const minNeeded = getMinStaff(station, shiftName);
-          const maxAllowed = station.max_staff ?? 99;
+          const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
+            s === sid && isCLSRole(eid, empRoleMap)
+          ).length;
+          const maxCLS = getMaxCLS(station);
 
-          // Place if understaffed or if station needs CLS coverage
-          if (currentStaff < minNeeded || (
-            station.require_cls === 1 && currentStaff < maxAllowed &&
+          // Place if understaffed and CLS slots available, or if station has no CLS at all
+          if (clsHere < maxCLS && (currentStaff < minNeeded || (
+            station.require_cls === 1 &&
             ![...stationMap.entries()].some(([eid, s]) => s === sid && isCLSRole(eid, empRoleMap))
-          )) {
+          ))) {
             stationMap.set(pd.employee_id, sid);
             locked.add(pd.employee_id);
             break;
@@ -1767,6 +1780,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
         // Non-admin employees go to their best bench station (never Admin)
         const benchQuals = getBenchQuals(a.employee_id);
+        const empRole = empRoleMap.get(a.employee_id);
         let bestSid = -1;
         let bestNeed = -Infinity;
         for (const sid of benchQuals) {
@@ -1775,13 +1789,38 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const current = [...stationMap.values()].filter(v => v === sid).length;
           const maxAllowed = station.max_staff ?? 99;
           if (current >= maxAllowed) continue;
+          // Respect role-specific caps (CLS can't exceed CLS slots, MLT can't exceed 1)
+          if (isCLSRole(a.employee_id, empRoleMap)) {
+            const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
+              s === sid && isCLSRole(eid, empRoleMap)).length;
+            if (clsHere >= getMaxCLS(station)) continue;
+          }
+          if (empRole === 'mlt') {
+            const mltsHere = [...stationMap.entries()].filter(([eid, s]) =>
+              s === sid && empRoleMap.get(eid) === 'mlt').length;
+            if (mltsHere >= 1) continue;
+          }
           const need = getMinStaff(station, shiftName) - current;
           if (need > bestNeed) { bestNeed = need; bestSid = sid; }
         }
         if (bestSid >= 0) {
           stationMap.set(a.employee_id, bestSid);
+        } else {
+          // All role-specific slots full — assign to least-staffed qualified station anyway
+          // (everyone must have a station; over-cap generates a warning, not a gap)
+          let fallbackSid = -1;
+          let fallbackNeed = -Infinity;
+          for (const sid of benchQuals) {
+            const station = realStations.find(s => s.id === sid);
+            if (!station) continue;
+            const current = [...stationMap.values()].filter(v => v === sid).length;
+            const need = getMinStaff(station, shiftName) - current;
+            if (need > fallbackNeed) { fallbackNeed = need; fallbackSid = sid; }
+          }
+          if (fallbackSid >= 0) {
+            stationMap.set(a.employee_id, fallbackSid);
+          }
         }
-        // If all stations at max, leave unassigned — per-diem has no seat today
       }
     }
 
