@@ -1747,7 +1747,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       }
     }
 
-    // ── Layer 7: Overflow — assign remaining to Admin (if qualified) or best bench station ──
+    // ── Layer 7: Overflow — place remaining non-admin employees at best bench station ──
     function layer7_overflow(
       pool: Assignment[],
       locked: Set<number>,
@@ -1757,33 +1757,31 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       for (const a of pool) {
         if (stationMap.has(a.employee_id)) continue;
 
+        // If employee has Admin in their station qualifications, send to Admin
+        // (admin-role employees are handled in Layer 3, but admin-parked like Shayna may reach here)
         const allQuals = empStationMap.get(a.employee_id) ?? [];
-        const hasAdmin = adminStation && allQuals.includes(adminStation.id);
-
-        if (hasAdmin) {
-          // Qualified for Admin — send there
+        if (adminStation && allQuals.includes(adminStation.id)) {
           stationMap.set(a.employee_id, adminStation.id);
-        } else {
-          // Not qualified for Admin — place at best bench station (least staffed, under max)
-          const benchQuals = getBenchQuals(a.employee_id);
-          let bestSid = -1;
-          let bestNeed = -Infinity;
-          for (const sid of benchQuals) {
-            const station = realStations.find(s => s.id === sid);
-            if (!station) continue;
-            const current = [...stationMap.values()].filter(v => v === sid).length;
-            const maxAllowed = station.max_staff ?? 99;
-            if (current >= maxAllowed) continue;
-            const need = getMinStaff(station, shiftName) - current;
-            if (need > bestNeed) { bestNeed = need; bestSid = sid; }
-          }
-          if (bestSid >= 0) {
-            stationMap.set(a.employee_id, bestSid);
-          } else if (adminStation) {
-            // Last resort: Admin even without qualification (shouldn't happen)
-            stationMap.set(a.employee_id, adminStation.id);
-          }
+          continue;
         }
+
+        // Non-admin employees go to their best bench station (never Admin)
+        const benchQuals = getBenchQuals(a.employee_id);
+        let bestSid = -1;
+        let bestNeed = -Infinity;
+        for (const sid of benchQuals) {
+          const station = realStations.find(s => s.id === sid);
+          if (!station) continue;
+          const current = [...stationMap.values()].filter(v => v === sid).length;
+          const maxAllowed = station.max_staff ?? 99;
+          if (current >= maxAllowed) continue;
+          const need = getMinStaff(station, shiftName) - current;
+          if (need > bestNeed) { bestNeed = need; bestSid = sid; }
+        }
+        if (bestSid >= 0) {
+          stationMap.set(a.employee_id, bestSid);
+        }
+        // If all stations at max, leave unassigned — per-diem has no seat today
       }
     }
 
