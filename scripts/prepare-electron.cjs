@@ -20,8 +20,9 @@ fs.mkdirSync(path.join(OUT, 'server'), { recursive: true });
 console.log('Bundling server with esbuild...');
 // Bundle as CJS so require() works in Electron's main process
 // Use define to replace import.meta.url with a CJS-compatible expression
+const esbuildBin = path.join(ROOT, 'node_modules', '.bin', 'esbuild');
 execSync(
-  'npx esbuild server/dist/index.js --bundle --platform=node --format=cjs --outfile=electron-deps/server/index.cjs --external:better-sqlite3 --define:import.meta.url=import_meta_url --banner:js="var import_meta_url = require(\'url\').pathToFileURL(__filename).href;"',
+  `"${esbuildBin}" server/dist/index.js --bundle --platform=node --format=cjs --outfile=electron-deps/server/index.cjs --external:better-sqlite3 --define:import.meta.url=import_meta_url --banner:js="var import_meta_url = require('url').pathToFileURL(__filename).href;"`,
   { cwd: ROOT, stdio: 'inherit' }
 );
 
