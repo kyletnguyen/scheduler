@@ -2443,6 +2443,44 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               }
               if (chained) break;
             }
+            // Strategy 3: find ANY MLT on the board who can cover currentSid,
+            // move them there, and move ap to preferred (displacing someone who goes
+            // to where the covering MLT was)
+            if (!chained) {
+              // Find an MLT anywhere (not at preferred, not ap) who can do Micro
+              const coverMLT = dailyGroup.find(a => {
+                if (a.employee_id === ap.employee_id) return false;
+                if (a.station_id === preferredSid) return false;
+                if (a.station_id === currentSid) return false;
+                if (empRoleMap.get(a.employee_id) !== 'mlt') return false;
+                if (!empStationMap.get(a.employee_id)!.includes(currentSid)) return false;
+                return true;
+              });
+              if (coverMLT) {
+                const coverFromSid = coverMLT.station_id!;
+                // Someone at preferred needs to go to coverMLT's old station
+                const filler = dailyGroup.find(a => {
+                  if (a.station_id !== preferredSid) return false;
+                  if (a.employee_id === ap.employee_id) return false;
+                  if (!empStationMap.get(a.employee_id)!.includes(coverFromSid)) return false;
+                  if (empRoleMap.get(a.employee_id) === 'admin') return false;
+                  return true;
+                });
+                if (filler) {
+                  // Check 1-MLT for all affected stations
+                  const fillerIsMLT = empRoleMap.get(filler.employee_id) === 'mlt';
+                  const pMLTs = mltCountAt(preferredSid) - (fillerIsMLT ? 1 : 0) + 1;
+                  const cMLTs = mltCountAt(currentSid) - 1 + 1; // ap leaves, coverMLT arrives (MLT)
+                  const fMLTs = mltCountAt(coverFromSid) - 1 + (fillerIsMLT ? 1 : 0);
+                  if (pMLTs <= 1 && cMLTs <= 1 && fMLTs <= 1) {
+                    ap.station_id = preferredSid;
+                    filler.station_id = coverFromSid;
+                    coverMLT.station_id = currentSid;
+                    chained = true;
+                  }
+                }
+              }
+            }
           }
         }
       }
