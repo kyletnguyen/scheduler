@@ -277,6 +277,16 @@ export default function MonthGrid() {
         pdf.text('PTO', lx + 22, ly);
         lx += pdf.getTextWidth('PTO') + 32;
 
+        pdf.setFillColor(254, 178, 178);
+        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.setTextColor(153, 27, 27);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text('½', lx + 9, ly - 1, { align: 'center' });
+        pdf.setTextColor(80, 80, 80);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text('Half Day', lx + 22, ly);
+        lx += pdf.getTextWidth('Half Day') + 32;
+
         pdf.setFillColor(240, 240, 240);
         pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
         pdf.setTextColor(180, 180, 180);
@@ -498,15 +508,9 @@ export default function MonthGrid() {
               bgColor = [254, 202, 202];
               textColor = [185, 28, 28];
             } else if (text === '½' || text.endsWith('/2')) {
-              // Partial PTO — use station color with orange tint if station assigned
-              const stationPart = text.endsWith('/2') ? text.slice(0, -2) : null;
-              const stationMatch = stationPart ? Object.keys(STATION_STYLES).find(s => getStationDisplay(s).abbr === stationPart) : null;
-              if (stationMatch) {
-                bgColor = [...getStationDisplay(stationMatch).rgb] as [number, number, number];
-              } else {
-                bgColor = [255, 237, 213];
-              }
-              textColor = [255, 255, 255];
+              // Partial PTO — red-ish like PTO but distinguishable
+              bgColor = [254, 178, 178];
+              textColor = [153, 27, 27];
             } else {
               const cd = cellData.get(`${ri}-${dayIdx}`);
               if (cd) {
@@ -782,6 +786,10 @@ export default function MonthGrid() {
           <span className="text-gray-600">PTO</span>
         </div>
         <div className="flex items-center gap-1.5">
+          <span className="w-6 h-5 rounded text-[9px] font-bold flex items-center justify-center bg-red-300 text-red-900">½</span>
+          <span className="text-gray-600">Half Day</span>
+        </div>
+        <div className="flex items-center gap-1.5">
           <span className="w-6 h-5 rounded text-[10px] flex items-center justify-center bg-gray-100 text-gray-400">&mdash;</span>
           <span className="text-gray-600">Off</span>
         </div>
@@ -902,15 +910,15 @@ export default function MonthGrid() {
                       const station = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
                       const label = station ? `${station.abbr}/2` : '½';
                       cellContent = (
-                        <span className={`px-1 h-5 rounded text-[9px] font-bold flex items-center justify-center ${station ? `${station.bg} text-white` : 'bg-orange-400 text-white'} shadow-sm ring-1 ring-inset ring-orange-300/60`}>
+                        <span className="px-1 h-5 rounded text-[9px] font-bold flex items-center justify-center bg-red-300 text-red-900 shadow-sm">
                           {label}
                         </span>
                       );
-                      cellBg = 'bg-orange-50';
+                      cellBg = 'bg-red-50';
                     } else if (offType === 'custom') {
                       // Partial PTO, no assignment yet
-                      cellContent = <span className="text-[10px] font-bold text-orange-500">½</span>;
-                      cellBg = 'bg-orange-50';
+                      cellContent = <span className="text-[10px] font-bold text-red-500">½</span>;
+                      cellBg = 'bg-red-50';
                     } else if (assignment) {
                       const isCrossShift = emp.default_shift !== 'floater' && assignment.shift_name.toLowerCase() !== emp.default_shift;
                       const icon = SHIFT_ICONS[assignment.shift_name];
