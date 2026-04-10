@@ -409,14 +409,13 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
           // On weekends, 1 MLT floats between Hema and Chemistry — suppress individual understaffing
           if (!(isWkend && isHemaOrChem)) {
             const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-            // PM/Night per-station shortages are not critical — only 1-3 people cover all stations
-            if (isAMShift) {
-              warnings.push(`CRITICAL: ${station.name} needs ${minNeeded} staff but only ${assigned} assigned on ${group[0].date} (${shiftName})`);
-            }
+            // PM/Night per-station shortages are INFO (only 1-3 people cover all stations)
+            const severity = isAMShift ? 'CRITICAL' : 'INFO';
+            warnings.push(`${severity}: ${station.name} needs ${minNeeded} staff but only ${assigned} assigned on ${group[0].date} (${shiftName})`);
           }
         }
-        if (stationAssignees.length > 0 && isAMShift) {
-          // Check MLT preference for stations that allow MLTs (AM only)
+        if (stationAssignees.length > 0) {
+          // Check MLT preference for stations that allow MLTs
           const allowsMLT = station.require_cls === 1;
           if (allowsMLT) {
             const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
@@ -427,13 +426,13 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
               const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
               let suppress = false;
               if (isWeekend && isHemaOrChem) {
-                // On weekends, 1 MLT floats between Hema and Chemistry —
-                // suppress "no MLT" for both stations entirely
                 suppress = true;
               }
               if (!suppress) {
                 const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-                warnings.push(`PIVOTAL: ${station.name} has no MLT assigned on ${group[0].date} (${shiftName})`);
+                // AM: PIVOTAL, PM/Night: INFO (no MLTs expected)
+                const severity = isAMShift ? 'PIVOTAL' : 'INFO';
+                warnings.push(`${severity}: ${station.name} has no MLT assigned on ${group[0].date} (${shiftName})`);
               }
             }
           }
@@ -445,7 +444,8 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
             });
             if (!hasCLS) {
               const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-              warnings.push(`CRITICAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
+              const severity = isAMShift ? 'CRITICAL' : 'INFO';
+              warnings.push(`${severity}: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
             }
           }
         }

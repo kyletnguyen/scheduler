@@ -107,7 +107,7 @@ export default function MonthGrid() {
 
   // Index: date -> list of coverage issues (parsed from warnings)
   const stationNames = Object.keys(STATION_STYLES);
-  const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn' | 'suggestion'; message: string }[]>();
+  const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn' | 'info' | 'suggestion'; message: string }[]>();
   for (const w of warnings) {
     const dateMatch = w.match(/(\d{4}-\d{2}-\d{2})/);
     if (!dateMatch) continue;
@@ -123,14 +123,15 @@ export default function MonthGrid() {
       if (w.includes(sn)) { station = sn; break; }
     }
 
-    const severity: 'critical' | 'warn' | 'suggestion' =
+    const severity: 'critical' | 'warn' | 'info' | 'suggestion' =
       (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical'
+      : w.startsWith('INFO:') ? 'info'
       : w.startsWith('SUGGESTION:') ? 'suggestion'
       : 'warn';
 
     // Simplified message
     let msg = w
-      .replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION): /, '')
+      .replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION|INFO): /, '')
       .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
       .replace(/\s+/g, ' ')
       .trim();
@@ -472,6 +473,170 @@ export default function MonthGrid() {
 
   const todayStr = format(new Date(), 'yyyy-MM-dd');
 
+  // Pre-compute warnings grouped by shift for inline display
+  type ShiftIssue = { severity: 'critical' | 'warn' | 'info' | 'suggestion'; date: string; msg: string; station: string };
+  const warningsByShift = (() => {
+    const result: Record<string, { stationIssues: Map<string, ShiftIssue[]>; noCoverageDates: string[] }> = {
+      am: { stationIssues: new Map(), noCoverageDates: [] },
+      pm: { stationIssues: new Map(), noCoverageDates: [] },
+      night: { stationIssues: new Map(), noCoverageDates: [] },
+    };
+    const sNames = Object.keys(STATION_STYLES);
+
+    for (const w of warnings) {
+      // "No coverage" warnings
+      const noCovrMatch = w.match(/No coverage for (\w+) shift on (\d{4}-\d{2}-\d{2})/);
+      if (noCovrMatch) {
+        const shift = noCovrMatch[1].toLowerCase();
+        const dateStr = format(new Date(noCovrMatch[2] + 'T00:00:00'), 'EEE M/d');
+        if (result[shift]) result[shift].noCoverageDates.push(dateStr);
+        continue;
+      }
+
+      // Station-specific warnings
+      let matchedStation = '';
+      for (const sn of sNames) {
+        if (w.includes(sn)) { matchedStation = sn; break; }
+      }
+      if (!matchedStation) continue;
+
+      const shiftMatch = w.match(/\((\w+)\)\s*$/) || w.match(/\b(AM|PM|Night)\b\s+shift/i);
+      const shift = shiftMatch ? shiftMatch[1].toLowerCase() : '';
+      if (!result[shift]) continue;
+
+      const clean = w.replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION|INFO): /, '');
+      const dateMatch = clean.match(/(\d{4}-\d{2}-\d{2})/);
+      const dateStr = dateMatch ? format(new Date(dateMatch[1] + 'T00:00:00'), 'EEE M/d') : '';
+      let msg = clean
+        .replace(matchedStation, '')
+        .replace(/\s*\(\w+\)\s*$/, '')
+        .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^[—\-–\s]+/, '');
+
+      const severity: ShiftIssue['severity'] =
+        (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical'
+        : w.startsWith('INFO:') ? 'info'
+        : w.startsWith('SUGGESTION:') ? 'suggestion'
+        : 'warn';
+
+      const map = result[shift].stationIssues;
+      if (!map.has(matchedStation)) map.set(matchedStation, []);
+      map.get(matchedStation)!.push({ severity, date: dateStr, msg, station: matchedStation });
+    }
+    return result;
+  })();
+
+  // Render inline warning panel for a shift section
+  const renderShiftWarnings = (shiftKey: string) => {
+    const data = warningsByShift[shiftKey];
+    if (!data) return null;
+    const totalStation = [...data.stationIssues.values()].reduce((s, arr) => s + arr.length, 0);
+    const totalIssues = totalStation + data.noCoverageDates.length;
+    if (totalIssues === 0) return null;
+
+    const hasCritical = data.noCoverageDates.length > 0 ||
+      [...data.stationIssues.values()].some(arr => arr.some(i => i.severity === 'critical'));
+    const borderColor = hasCritical ? 'border-red-200' : 'border-amber-200';
+    const bgColor = hasCritical ? 'bg-red-50' : 'bg-amber-50';
+    const headerColor = hasCritical ? 'text-red-800' : 'text-amber-800';
+    const badgeBg = hasCritical ? 'bg-red-500' : 'bg-amber-500';
+
+    return (
+      <tr>
+        <td colSpan={days.length + 1} className="p-0">
+          <div className={`mx-2 my-1.5 border ${borderColor} rounded-lg overflow-hidden`}>
+            <div className={`flex items-center justify-between px-3 py-1.5 ${bgColor} border-b ${borderColor}`}>
+              <span className={`text-xs font-bold ${headerColor} flex items-center gap-1.5`}>
+                <span className={`w-4 h-4 rounded-full ${badgeBg} text-white text-[9px] font-bold flex items-center justify-center`}>!</span>
+                {totalIssues} issue{totalIssues !== 1 ? 's' : ''}
+              </span>
+              <button onClick={() => setShowWarnings(false)} className="text-gray-400 hover:text-gray-600 text-[10px]">hide</button>
+            </div>
+
+            {/* No coverage dates */}
+            {data.noCoverageDates.length > 0 && (
+              <div className="px-3 py-2 border-b border-red-100">
+                <div className="text-[11px] text-red-600 font-medium mb-1">No staff assigned:</div>
+                <div className="flex flex-wrap gap-1">
+                  {data.noCoverageDates.map(d => (
+                    <span key={d} className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded font-medium">{d}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Station cards */}
+            {data.stationIssues.size > 0 && (
+              <div className="p-2 grid grid-cols-2 lg:grid-cols-4 gap-2">
+                {[...data.stationIssues.entries()].map(([stationName, issues]) => {
+                  const stationInfo = STATION_STYLES[stationName];
+                  const criticalIssues = issues.filter(i => i.severity === 'critical');
+                  const warnIssues = issues.filter(i => i.severity === 'warn');
+                  const infoIssues = issues.filter(i => i.severity === 'info');
+                  const hasCrit = criticalIssues.length > 0;
+
+                  // Group info issues by message pattern (aggregate dates)
+                  const infoByMsg = new Map<string, string[]>();
+                  for (const issue of infoIssues) {
+                    const key = issue.msg;
+                    if (!infoByMsg.has(key)) infoByMsg.set(key, []);
+                    if (issue.date) infoByMsg.get(key)!.push(issue.date);
+                  }
+
+                  return (
+                    <div key={stationName} className="border rounded overflow-hidden">
+                      <div className={`${stationInfo?.bg ?? 'bg-gray-500'} px-2 py-1 flex items-center justify-between`}>
+                        <span className="text-white text-[10px] font-bold">
+                          {stationInfo?.abbr ?? '??'} {stationName}
+                          {hasCrit && ' !'}
+                        </span>
+                        <span className="text-white/70 text-[9px]">{issues.length}</span>
+                      </div>
+                      <div className="px-2 py-1 max-h-[120px] overflow-y-auto space-y-0.5">
+                        {/* Critical issues — show each one */}
+                        {criticalIssues.map((issue, i) => (
+                          <div key={`c${i}`} className="flex items-start gap-1 text-[10px]">
+                            <span className="shrink-0 mt-px font-bold text-red-500">!</span>
+                            <span className="text-gray-700">{issue.date ? `${issue.date}: ` : ''}{issue.msg}</span>
+                          </div>
+                        ))}
+                        {/* Warn issues — show each one */}
+                        {warnIssues.map((issue, i) => (
+                          <div key={`w${i}`} className="flex items-start gap-1 text-[10px]">
+                            <span className="shrink-0 mt-px font-bold text-amber-400">{'\u25CF'}</span>
+                            <span className="text-gray-500">{issue.date ? `${issue.date}: ` : ''}{issue.msg}</span>
+                          </div>
+                        ))}
+                        {/* Info issues — aggregate by message, show date chips */}
+                        {[...infoByMsg.entries()].map(([msg, dates]) => (
+                          <div key={msg} className="text-[10px] text-gray-400 mt-0.5">
+                            <div className="flex items-center gap-1">
+                              <span className="shrink-0 text-blue-300">{'\u25CF'}</span>
+                              <span>{msg}</span>
+                              <span className="text-gray-300">({dates.length}d)</span>
+                            </div>
+                            <div className="flex flex-wrap gap-0.5 ml-3 mt-0.5">
+                              {dates.slice(0, 6).map(d => (
+                                <span key={d} className="bg-blue-50 text-blue-400 text-[9px] px-1 py-px rounded">{d}</span>
+                              ))}
+                              {dates.length > 6 && <span className="text-[9px] text-gray-300">+{dates.length - 6} more</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
@@ -552,204 +717,11 @@ export default function MonthGrid() {
         </div>
       </div>
 
-      {/* Schedule Issues — per station, split by shift */}
-      {warnings.length > 0 && showWarnings && (() => {
-        const SHIFT_LABELS: Record<string, { label: string; color: string; bgLight: string }> = {
-          AM:    { label: 'AM (Day)',       color: 'text-amber-700',  bgLight: 'bg-amber-50' },
-          PM:    { label: 'PM (Evening)',   color: 'text-indigo-700', bgLight: 'bg-indigo-50' },
-          Night: { label: 'Night (Graveyard)', color: 'text-gray-700',   bgLight: 'bg-gray-100' },
-          '':    { label: 'General',        color: 'text-gray-600',   bgLight: 'bg-gray-50' },
-        };
-
-        // Parse into: station -> shift -> issues[]
-        const sNames = Object.keys(STATION_STYLES);
-        const byStationShift = new Map<string, Map<string, { severity: 'critical' | 'warn' | 'suggestion'; date: string; msg: string }[]>>();
-        let totalIssues = 0;
-
-        for (const w of warnings) {
-          let matchedStation = '';
-          for (const sn of sNames) {
-            if (w.includes(sn)) { matchedStation = sn; break; }
-          }
-          if (!matchedStation) continue; // skip general/hours warnings
-
-          // Extract shift
-          const shiftMatch = w.match(/\((\w+)\)\s*$/) || w.match(/\b(AM|PM|Night)\b\s+shift/i);
-          const shift = shiftMatch ? shiftMatch[1] : '';
-
-          const clean = w.replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION): /, '');
-          const dateMatch = clean.match(/(\d{4}-\d{2}-\d{2})/);
-          const dateStr = dateMatch ? format(new Date(dateMatch[1] + 'T00:00:00'), 'EEE M/d') : '';
-          let msg = clean
-            .replace(matchedStation, '')
-            .replace(/\s*\(\w+\)\s*$/, '')
-            .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .replace(/^[—\-–\s]+/, '');
-
-          const severity: 'critical' | 'warn' | 'suggestion' =
-            (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical'
-            : w.startsWith('SUGGESTION:') ? 'suggestion'
-            : 'warn';
-
-          if (!byStationShift.has(matchedStation)) byStationShift.set(matchedStation, new Map());
-          const shiftMap = byStationShift.get(matchedStation)!;
-          if (!shiftMap.has(shift)) shiftMap.set(shift, []);
-          shiftMap.get(shift)!.push({ severity, date: dateStr, msg });
-          totalIssues++;
-        }
-
-        // Also gather shift-level "no one assigned at all" warnings
-        const shiftOnlyIssues = new Map<string, string[]>();
-        for (const w of warnings) {
-          const noCovrMatch = w.match(/No coverage for (\w+) shift on (\d{4}-\d{2}-\d{2})/);
-          if (noCovrMatch) {
-            const shift = noCovrMatch[1];
-            const dateStr = format(new Date(noCovrMatch[2] + 'T00:00:00'), 'EEE M/d');
-            if (!shiftOnlyIssues.has(shift)) shiftOnlyIssues.set(shift, []);
-            shiftOnlyIssues.get(shift)!.push(dateStr);
-            totalIssues++;
-          }
-        }
-
-        if (byStationShift.size === 0 && shiftOnlyIssues.size === 0) return null;
-
-        return (
-          <div className="mb-4 bg-white border border-red-200 rounded-lg shadow-sm overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-2.5 bg-red-50 border-b border-red-200">
-              <h3 className="text-sm font-bold text-red-800 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">!</span>
-                Coverage Issues
-                <span className="text-xs font-normal text-red-500">({totalIssues} total)</span>
-              </h3>
-              <button onClick={() => setShowWarnings(false)} className="text-red-400 hover:text-red-600 text-xs font-medium">Dismiss</button>
-            </div>
-
-            {/* Empty shifts — no one assigned at all */}
-            {shiftOnlyIssues.size > 0 && (
-              <div className="px-4 py-3 border-b border-red-100">
-                {[...shiftOnlyIssues.entries()].sort(([a], [b]) => {
-                  const order = ['AM', 'PM', 'Night'];
-                  return order.indexOf(a) - order.indexOf(b);
-                }).map(([shift, dates]) => {
-                  const sl = SHIFT_LABELS[shift] ?? SHIFT_LABELS[''];
-                  return (
-                    <div key={shift} className="mb-2 last:mb-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-xs font-bold ${sl.color}`}>{sl.label}</span>
-                        <span className="text-[11px] text-red-600 font-medium">
-                          No staff assigned on {dates.length} day{dates.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {dates.map(d => (
-                          <span key={d} className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded font-medium">{d}</span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Station cards */}
-            <div className="p-3 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-3">
-              {[...byStationShift.entries()].map(([stationName, shiftMap]) => {
-                const stationInfo = STATION_STYLES[stationName];
-                const stationTotal = [...shiftMap.values()].reduce((sum, arr) => sum + arr.length, 0);
-                const hasCritical = [...shiftMap.values()].some(arr => arr.some(i => i.severity === 'critical'));
-                return (
-                  <div key={stationName} className="bg-white border rounded-lg overflow-hidden shadow-sm">
-                    {/* Station header bar */}
-                    <div className={`${stationInfo?.bg ?? 'bg-gray-500'} px-3 py-2 flex items-center justify-between`}>
-                      <span className="text-white text-xs font-bold flex items-center gap-1.5">
-                        {stationInfo?.abbr ?? '??'} {stationName}
-                        {hasCritical && <span className="w-4 h-4 rounded-full bg-white/30 text-white text-[9px] font-bold flex items-center justify-center">!</span>}
-                      </span>
-                      <span className="text-white/80 text-[10px]">{stationTotal} issue{stationTotal !== 1 ? 's' : ''}</span>
-                    </div>
-                    {/* Issues grouped by shift */}
-                    <div className="max-h-[200px] overflow-y-auto divide-y divide-gray-100">
-                      {[...shiftMap.entries()].sort(([a], [b]) => {
-                        const order = ['AM', 'PM', 'Night', ''];
-                        return order.indexOf(a) - order.indexOf(b);
-                      }).map(([shift, issues]) => {
-                        const sl = SHIFT_LABELS[shift] ?? SHIFT_LABELS[''];
-                        return (
-                          <div key={shift} className="px-3 py-1.5">
-                            <div className={`text-[10px] font-bold ${sl.color} mb-0.5`}>{sl.label}</div>
-                            <div className="space-y-0.5">
-                              {issues.map((issue, i) => (
-                                <div key={i} className="flex items-start gap-1.5 text-[11px]">
-                                  <span className={`shrink-0 mt-px font-bold ${issue.severity === 'critical' ? 'text-red-500' : 'text-amber-400'}`}>
-                                    {issue.severity === 'critical' ? '!' : '\u25CF'}
-                                  </span>
-                                  <span className={issue.severity === 'critical' ? 'text-gray-700' : 'text-gray-500'}>
-                                    {issue.date ? `${issue.date}: ` : ''}{issue.msg}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })()}
+      {/* Warnings are now shown inline within each shift section of the grid */}
 
       {/* Roster grid */}
       <div className="bg-white rounded-lg shadow-md border border-gray-200 overflow-x-auto">
         <table className="text-xs w-full border-collapse">
-          <thead>
-            <tr>
-              <th className="sticky left-0 bg-gray-100 z-10 px-3 py-2.5 text-left font-bold text-gray-800 border-b-2 border-r-2 border-gray-300 min-w-[150px] text-sm">
-                Employee
-              </th>
-              {days.map((day) => {
-                const dateStr = format(day, 'yyyy-MM-dd');
-                const dayNum = getDay(day);
-                const isWknd = dayNum === 0 || dayNum === 6;
-                const isSat = dayNum === 6;
-                const isToday = dateStr === todayStr;
-                // Main header sits above AM section — only show AM issues
-                const dayIssues = (coverageByDate.get(dateStr) ?? []).filter(i => i.shift === 'AM');
-                const hasCritical = dayIssues.some(i => i.severity === 'critical');
-                const hasWarn = dayIssues.length > 0 && !hasCritical;
-
-                const issueTooltip = dayIssues.length > 0
-                  ? `AM — ${format(day, 'EEE M/d')}:\n${dayIssues.map(i => `${i.severity === 'critical' ? '! ' : ''}${i.message}`).join('\n')}`
-                  : '';
-
-                return (
-                  <th
-                    key={dateStr}
-                    title={issueTooltip}
-                    onClick={() => setCoverageModal({ date: dateStr, shift: 'AM' })}
-                    className={`px-1 py-2 text-center font-bold border-b-2 min-w-[38px] cursor-pointer ${
-                      isSat ? 'border-l-2 border-l-orange-300' : ''
-                    } ${
-                      hasCritical ? 'bg-red-100 text-red-800 border-red-300' :
-                      hasWarn ? 'bg-amber-100 text-amber-800 border-amber-300' :
-                      isToday ? 'bg-blue-100 text-blue-800 border-gray-300' :
-                      isWknd ? 'bg-orange-100 text-orange-800 border-gray-300' :
-                      'bg-gray-100 text-gray-600 border-gray-300'
-                    }`}
-                  >
-                    <div className="leading-tight">
-                      <div className={`text-[10px] ${isWknd ? 'font-extrabold' : 'font-semibold'}`}>{format(day, 'EEE')}</div>
-                      <div className={`text-sm ${isWknd ? 'font-extrabold' : ''}`}>{format(day, 'd')}</div>
-                    </div>
-                  </th>
-                );
-              })}
-            </tr>
-          </thead>
           <tbody>
             {employees.map((emp, idx) => {
               const empTimeOff = timeOffIndex.get(emp.id);
@@ -765,11 +737,11 @@ export default function MonthGrid() {
                       {groupLabel} Shift
                     </td>
                   </tr>
-                  </>
-                )}
-                {showGroupHeader && emp.default_shift !== 'am' && (
+                  {showWarnings && renderShiftWarnings(emp.default_shift)}
+                  {/* Date header row — shown for every shift section */}
                   <tr>
-                    <td className="sticky left-0 bg-gray-100 z-10 border-r-2 border-b-2 border-gray-300 px-3 py-2 text-[10px] text-gray-400 font-medium">
+                    <td className="sticky left-0 bg-gray-100 z-10 border-r-2 border-b-2 border-gray-300 px-3 py-2 text-sm font-bold text-gray-800 min-w-[150px]">
+                      Employee
                     </td>
                     {days.map((day) => {
                       const dStr = format(day, 'yyyy-MM-dd');
@@ -777,10 +749,10 @@ export default function MonthGrid() {
                       const dIsWknd = dNum === 0 || dNum === 6;
                       const dIsSat = dNum === 6;
                       const dIsToday = dStr === todayStr;
-                      const shiftKey = emp.default_shift === 'pm' ? 'PM' : emp.default_shift === 'night' ? 'Night' : '';
+                      const shiftKey = emp.default_shift === 'pm' ? 'PM' : emp.default_shift === 'night' ? 'Night' : 'AM';
                       const dIssues = (coverageByDate.get(dStr) ?? []).filter(i => i.shift === shiftKey);
                       const dHasCrit = dIssues.some(i => i.severity === 'critical');
-                      const dHasWarn = dIssues.length > 0 && !dHasCrit;
+                      const dHasWarn = dIssues.some(i => i.severity === 'warn') && !dHasCrit;
 
                       const dTooltip = dIssues.length > 0
                         ? `${shiftKey} — ${format(day, 'EEE M/d')}:\n${dIssues.map(i => `${i.severity === 'critical' ? '! ' : ''}${i.message}`).join('\n')}`
@@ -809,6 +781,7 @@ export default function MonthGrid() {
                       );
                     })}
                   </tr>
+                  </>
                 )}
                 <tr className="hover:bg-blue-50/40 border-b border-gray-200">
                   <td className="sticky left-0 bg-white z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px]">
@@ -983,11 +956,11 @@ export default function MonthGrid() {
         </table>
       </div>
 
-      {/* Employee Hours Summary */}
+      {/* Employee Hours & Station Summary */}
       {assignments.length > 0 && (
         <div className="mt-4 bg-white rounded-lg shadow-md border border-gray-200 overflow-x-auto">
-          <div className="px-4 py-2.5 border-b border-gray-200 bg-gray-50">
-            <h3 className="text-sm font-bold text-gray-700">Hours Summary — {format(currentDate, 'MMMM yyyy')}</h3>
+          <div className="px-4 py-3 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-gray-100">
+            <h3 className="text-sm font-bold text-gray-700">Hours & Station Summary — {format(currentDate, 'MMMM yyyy')}</h3>
           </div>
           {(() => {
             // Build Sun-Sat week buckets from the month's days
@@ -998,7 +971,6 @@ export default function MonthGrid() {
             for (const day of days) {
               const dow = getDay(day);
               if (dow === 0 && currentWeekStart !== null) {
-                // New week starts on Sunday — flush previous
                 weeks.push({ label: `${format(currentWeekStart, 'M/d')}–${format(days[days.indexOf(day) - 1], 'M/d')}`, dates: currentDates });
                 currentDates = new Set<string>();
                 currentWeekStart = day;
@@ -1011,49 +983,117 @@ export default function MonthGrid() {
               weeks.push({ label: `${format(currentWeekStart, 'M/d')}–${format(lastDay, 'M/d')}`, dates: currentDates });
             }
 
+            // Build station breakdown per employee
+            const empStationCounts = new Map<number, Map<string, number>>();
+            for (const a of assignments) {
+              const sName = a.station_name || 'Unassigned';
+              if (!empStationCounts.has(a.employee_id)) empStationCounts.set(a.employee_id, new Map());
+              const counts = empStationCounts.get(a.employee_id)!;
+              counts.set(sName, (counts.get(sName) ?? 0) + 1);
+            }
+
+            // Shift group separators
+            let lastShift = '';
+
             return (
               <table className="text-xs w-full">
                 <thead>
-                  <tr className="bg-gray-50 border-b">
-                    <th className="text-left px-4 py-2 font-semibold text-gray-600">Employee</th>
-                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Target</th>
+                  <tr className="bg-gray-100 border-b-2 border-gray-300">
+                    <th className="text-left px-4 py-2.5 font-bold text-gray-700 sticky left-0 bg-gray-100 z-10">Employee</th>
+                    <th className="text-center px-3 py-2.5 font-bold text-gray-700">Target</th>
                     {weeks.map((wk, i) => (
-                      <th key={i} className="text-center px-2 py-2 font-semibold text-gray-600">{wk.label}</th>
+                      <th key={i} className="text-center px-2 py-2.5 font-bold text-gray-700 whitespace-nowrap">{wk.label}</th>
                     ))}
-                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Total</th>
-                    <th className="text-center px-3 py-2 font-semibold text-gray-600">Wknd</th>
+                    <th className="text-center px-3 py-2.5 font-bold text-gray-700">Total</th>
+                    <th className="text-center px-3 py-2.5 font-bold text-gray-700">Wknd</th>
+                    <th className="text-left px-3 py-2.5 font-bold text-gray-700">Stations</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {employees.map((emp) => {
-                    const empDates = new Set(assignments.filter(a => a.employee_id === emp.id).map(a => a.date));
+                  {employees.map((emp, empIdx) => {
+                    const empAssignments = assignments.filter(a => a.employee_id === emp.id);
+                    const empDates = new Set(empAssignments.map(a => a.date));
                     const totalDays = empDates.size;
                     const target = emp.target_hours_week;
                     const wkndDays = [...empDates].filter(d => {
                       const dow = getDay(new Date(d + 'T00:00:00'));
                       return dow === 0 || dow === 6;
                     }).length;
+                    const totalHours = totalDays * 8;
+                    const stationCounts = empStationCounts.get(emp.id) ?? new Map<string, number>();
+                    const stationOrder = ['Hematology/UA', 'Chemistry', 'Microbiology', 'Blood Bank', 'Admin', 'Unassigned'];
+                    const sortedStations = [...stationCounts.entries()].sort(([a], [b]) => {
+                      const ai = stationOrder.indexOf(a); const bi = stationOrder.indexOf(b);
+                      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+                    });
+
+                    // Shift group separator
+                    const showSep = emp.default_shift !== lastShift;
+                    lastShift = emp.default_shift;
+                    const groupLabel = emp.default_shift === 'am' ? 'AM' : emp.default_shift === 'pm' ? 'PM' : emp.default_shift.charAt(0).toUpperCase() + emp.default_shift.slice(1);
+                    const isEven = empIdx % 2 === 0;
 
                     return (
-                      <tr key={emp.id} className="border-b last:border-0 hover:bg-gray-50/50">
-                        <td className="px-4 py-1.5 font-medium text-gray-800">{emp.name}</td>
-                        <td className="text-center px-3 py-1.5 text-gray-500">{target}h</td>
-                        {weeks.map((wk, i) => {
-                          const wkDays = [...wk.dates].filter(d => empDates.has(d)).length;
-                          const wkHours = wkDays * 8;
-                          const over = wkHours > target;
-                          const under = wkHours < target && wk.dates.size >= 5; // only flag under if it's a full week
-                          return (
-                            <td key={i} className="text-center px-2 py-1.5">
-                              <span className={`font-semibold ${over ? 'text-red-600' : under ? 'text-amber-600' : 'text-gray-700'}`}>
-                                {wkHours}h
-                              </span>
+                      <React.Fragment key={emp.id}>
+                        {showSep && (
+                          <tr className="bg-gray-200">
+                            <td colSpan={weeks.length + 5} className="px-4 py-1.5 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-y border-gray-300">
+                              {groupLabel} Shift
                             </td>
-                          );
-                        })}
-                        <td className="text-center px-3 py-1.5 font-bold text-gray-800">{totalDays * 8}h</td>
-                        <td className="text-center px-3 py-1.5 text-gray-600">{wkndDays}</td>
-                      </tr>
+                          </tr>
+                        )}
+                        <tr className={`border-b border-gray-100 hover:bg-blue-50/40 transition-colors ${isEven ? 'bg-white' : 'bg-gray-50/60'}`}>
+                          <td className={`sticky left-0 z-10 px-4 py-2 font-semibold text-gray-800 ${isEven ? 'bg-white' : 'bg-gray-50/60'}`}>
+                            <div className="flex items-center gap-1.5">
+                              <span>{emp.name}</span>
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
+                                emp.role === 'cls' ? 'bg-emerald-100 text-emerald-700' :
+                                emp.role === 'mlt' ? 'bg-violet-100 text-violet-700' :
+                                'bg-sky-100 text-sky-700'
+                              }`}>{emp.role.toUpperCase()}</span>
+                              {emp.employment_type === 'per-diem' && <span className="text-[9px] text-gray-400">PD</span>}
+                              {emp.employment_type === 'part-time' && <span className="text-[9px] text-gray-400">PT</span>}
+                            </div>
+                          </td>
+                          <td className="text-center px-3 py-2 text-gray-400 font-medium">{target}h</td>
+                          {weeks.map((wk, i) => {
+                            const wkDays = [...wk.dates].filter(d => empDates.has(d)).length;
+                            const wkHours = wkDays * 8;
+                            const over = wkHours > target;
+                            const under = wkHours < target && wk.dates.size >= 5;
+                            return (
+                              <td key={i} className="text-center px-2 py-2">
+                                <span className={`font-semibold ${
+                                  over ? 'text-red-600 bg-red-50 px-1.5 py-0.5 rounded' :
+                                  under ? 'text-amber-600' :
+                                  'text-gray-700'
+                                }`}>
+                                  {wkHours}h
+                                </span>
+                              </td>
+                            );
+                          })}
+                          <td className="text-center px-3 py-2">
+                            <span className="font-bold text-gray-800 bg-gray-100 px-2 py-0.5 rounded">{totalHours}h</span>
+                          </td>
+                          <td className="text-center px-3 py-2">
+                            <span className={`font-medium ${wkndDays > 0 ? 'text-orange-600' : 'text-gray-400'}`}>{wkndDays}</span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap gap-1">
+                              {sortedStations.map(([sName, count]) => {
+                                const sd = getStationDisplay(sName);
+                                return (
+                                  <span key={sName} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${sd.bg} text-white`} title={`${sName}: ${count} day${count !== 1 ? 's' : ''}`}>
+                                    {sd.abbr}
+                                    <span className="text-white/80">{count}</span>
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </td>
+                        </tr>
+                      </React.Fragment>
                     );
                   })}
                 </tbody>
