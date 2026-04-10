@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, addDays as addDaysFns, subDays } from 'date-fns';
 import { useSchedule, useShifts, useWarnings, useDeleteAssignment, useGenerateSchedule } from '../../hooks/useSchedule';
 import { useEmployees } from '../../hooks/useEmployees';
 import { useTimeOff } from '../../hooks/useTimeOff';
@@ -63,6 +63,31 @@ export default function MonthGrid() {
   } | null>(null);
   const warnings = liveWarnings;
 
+  // Arrow key navigation for coverage modal
+  const navigateCoverageDay = useCallback((direction: 'prev' | 'next') => {
+    if (!coverageModal) return;
+    const current = new Date(coverageModal.date + 'T00:00:00');
+    const newDate = direction === 'next' ? addDaysFns(current, 1) : subDays(current, 1);
+    const newDateStr = format(newDate, 'yyyy-MM-dd');
+    // Stay within the current month
+    const monthStart = format(startOfMonth(currentDate), 'yyyy-MM-dd');
+    const monthEnd = format(endOfMonth(currentDate), 'yyyy-MM-dd');
+    if (newDateStr >= monthStart && newDateStr <= monthEnd) {
+      setCoverageModal({ date: newDateStr, shift: coverageModal.shift });
+    }
+  }, [coverageModal, currentDate]);
+
+  useEffect(() => {
+    if (!coverageModal) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); navigateCoverageDay('prev'); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); navigateCoverageDay('next'); }
+      if (e.key === 'Escape') { setCoverageModal(null); setEmployeeDetail(null); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [coverageModal, navigateCoverageDay]);
+
   const start = startOfMonth(currentDate);
   const end = endOfMonth(currentDate);
   const days = eachDayOfInterval({ start, end });
@@ -82,7 +107,7 @@ export default function MonthGrid() {
 
   // Index: date -> list of coverage issues (parsed from warnings)
   const stationNames = Object.keys(STATION_STYLES);
-  const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn'; message: string }[]>();
+  const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn' | 'suggestion'; message: string }[]>();
   for (const w of warnings) {
     const dateMatch = w.match(/(\d{4}-\d{2}-\d{2})/);
     if (!dateMatch) continue;
@@ -98,11 +123,14 @@ export default function MonthGrid() {
       if (w.includes(sn)) { station = sn; break; }
     }
 
-    const severity: 'critical' | 'warn' = (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical' : 'warn';
+    const severity: 'critical' | 'warn' | 'suggestion' =
+      (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical'
+      : w.startsWith('SUGGESTION:') ? 'suggestion'
+      : 'warn';
 
     // Simplified message
     let msg = w
-      .replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL): /, '')
+      .replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION): /, '')
       .replace(/on\s+\d{4}-\d{2}-\d{2}/, '')
       .replace(/\s+/g, ' ')
       .trim();
@@ -535,7 +563,7 @@ export default function MonthGrid() {
 
         // Parse into: station -> shift -> issues[]
         const sNames = Object.keys(STATION_STYLES);
-        const byStationShift = new Map<string, Map<string, { severity: 'critical' | 'warn'; date: string; msg: string }[]>>();
+        const byStationShift = new Map<string, Map<string, { severity: 'critical' | 'warn' | 'suggestion'; date: string; msg: string }[]>>();
         let totalIssues = 0;
 
         for (const w of warnings) {
@@ -549,7 +577,7 @@ export default function MonthGrid() {
           const shiftMatch = w.match(/\((\w+)\)\s*$/) || w.match(/\b(AM|PM|Night)\b\s+shift/i);
           const shift = shiftMatch ? shiftMatch[1] : '';
 
-          const clean = w.replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL): /, '');
+          const clean = w.replace(/^(CRITICAL|SCHEDULE ERROR|PIVOTAL|SUGGESTION): /, '');
           const dateMatch = clean.match(/(\d{4}-\d{2}-\d{2})/);
           const dateStr = dateMatch ? format(new Date(dateMatch[1] + 'T00:00:00'), 'EEE M/d') : '';
           let msg = clean
@@ -560,7 +588,10 @@ export default function MonthGrid() {
             .trim()
             .replace(/^[—\-–\s]+/, '');
 
-          const severity: 'critical' | 'warn' = (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical' : 'warn';
+          const severity: 'critical' | 'warn' | 'suggestion' =
+            (w.startsWith('CRITICAL:') || w.startsWith('SCHEDULE ERROR:')) ? 'critical'
+            : w.startsWith('SUGGESTION:') ? 'suggestion'
+            : 'warn';
 
           if (!byStationShift.has(matchedStation)) byStationShift.set(matchedStation, new Map());
           const shiftMap = byStationShift.get(matchedStation)!;
@@ -1083,13 +1114,18 @@ export default function MonthGrid() {
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => { setCoverageModal(null); setEmployeeDetail(null); }}>
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
-              {/* Header */}
+              {/* Header with day navigation */}
               <div className={`px-5 py-3 rounded-t-xl flex items-center justify-between ${
                 issues.some(i => i.severity === 'critical') ? 'bg-red-500'
                 : issues.length > 0 ? 'bg-amber-500'
                 : 'bg-emerald-500'
               }`}>
-                <div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); navigateCoverageDay('prev'); }}
+                  className="text-white/60 hover:text-white text-lg font-bold px-1"
+                  title="Previous day (Left arrow)"
+                >&#8249;</button>
+                <div className="text-center flex-1">
                   <h3 className="text-white font-bold text-base">{shift} Shift — {format(dayDate, 'EEE, MMM d')}</h3>
                   <p className="text-white/80 text-xs">
                     {issues.length > 0
@@ -1098,7 +1134,12 @@ export default function MonthGrid() {
                     }
                   </p>
                 </div>
-                <button onClick={() => { setCoverageModal(null); setEmployeeDetail(null); }} className="text-white/70 hover:text-white text-xl font-bold">&times;</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); navigateCoverageDay('next'); }}
+                  className="text-white/60 hover:text-white text-lg font-bold px-1"
+                  title="Next day (Right arrow)"
+                >&#8250;</button>
+                <button onClick={() => { setCoverageModal(null); setEmployeeDetail(null); }} className="text-white/70 hover:text-white text-xl font-bold ml-2">&times;</button>
               </div>
 
               <div className="p-5 space-y-4 max-h-[60vh] overflow-y-auto">
@@ -1109,9 +1150,13 @@ export default function MonthGrid() {
                     <div className="space-y-1.5">
                       {issues.map((issue, i) => (
                         <div key={i} className={`flex items-start gap-2 px-3 py-2 rounded-lg text-sm ${
-                          issue.severity === 'critical' ? 'bg-red-50 text-red-800' : 'bg-amber-50 text-amber-800'
+                          issue.severity === 'critical' ? 'bg-red-50 text-red-800'
+                          : issue.severity === 'suggestion' ? 'bg-blue-50 text-blue-800'
+                          : 'bg-amber-50 text-amber-800'
                         }`}>
-                          <span className="font-bold shrink-0 mt-0.5">{issue.severity === 'critical' ? '!' : '~'}</span>
+                          <span className="font-bold shrink-0 mt-0.5">{
+                            issue.severity === 'critical' ? '!' : issue.severity === 'suggestion' ? '\u2139' : '~'
+                          }</span>
                           <div>
                             <div className="font-medium">{issue.message}</div>
                             {issue.station && <div className="text-xs opacity-70 mt-0.5">Station: {issue.station}</div>}

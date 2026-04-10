@@ -315,10 +315,11 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
     if (!empStationMap.has(row.employee_id)) empStationMap.set(row.employee_id, []);
     empStationMap.get(row.employee_id)!.push(row.station_id);
   }
-  const allStationIds = stations.map(s => s.id);
+  const benchStationIdsAnalyze = stations.filter(s => s.name !== 'Admin').map(s => s.id);
+  const allStationIdsAnalyze = stations.map(s => s.id);
   for (const emp of employees) {
     if (!empStationMap.has(emp.id) || empStationMap.get(emp.id)!.length === 0) {
-      empStationMap.set(emp.id, [...allStationIds]);
+      empStationMap.set(emp.id, emp.role === 'admin' ? [...allStationIdsAnalyze] : [...benchStationIdsAnalyze]);
     }
   }
 
@@ -379,13 +380,26 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
     for (const emp of employees) empRoleMap.set(emp.id, emp.role);
 
     // Understaffing per station per shift+date
+    // Helper: CLS needed for a station on a given shift
+    const getCLSNeededAnalyze = (station: typeof warnStations[0], shiftName: string): number => {
+      if (shiftName === 'am') return (station as any).min_staff_am ?? station.min_staff ?? 1;
+      if (shiftName === 'pm') return (station as any).min_staff_pm ?? station.min_staff ?? 1;
+      if (shiftName === 'night') return (station as any).min_staff_night ?? station.min_staff ?? 1;
+      return station.min_staff ?? 1;
+    };
+    const getMLTSlotsAnalyze = (station: typeof warnStations[0], shiftName?: string): number => {
+      if (shiftName && shiftName !== 'am') return 0;
+      return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+    };
+    const getMinStaffAnalyze = (station: typeof warnStations[0], shiftName: string): number => {
+      return getCLSNeededAnalyze(station, shiftName) + getMLTSlotsAnalyze(station, shiftName);
+    };
+
     for (const [, group] of shiftDateGroups) {
       const groupShiftName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
+      const isAMShift = groupShiftName === 'am';
       for (const station of warnStations) {
-        const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-          : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-          : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-          : station.min_staff ?? 1;
+        const minNeeded = getMinStaffAnalyze(station, groupShiftName);
         const stationAssignees = group.filter(a => a.station_id === station.id);
         const assigned = stationAssignees.length;
         if (assigned < minNeeded) {
@@ -395,11 +409,14 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
           // On weekends, 1 MLT floats between Hema and Chemistry — suppress individual understaffing
           if (!(isWkend && isHemaOrChem)) {
             const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-            warnings.push(`CRITICAL: ${station.name} needs ${minNeeded} staff but only ${assigned} assigned on ${group[0].date} (${shiftName})`);
+            // PM/Night per-station shortages are not critical — only 1-3 people cover all stations
+            if (isAMShift) {
+              warnings.push(`CRITICAL: ${station.name} needs ${minNeeded} staff but only ${assigned} assigned on ${group[0].date} (${shiftName})`);
+            }
           }
         }
-        if (stationAssignees.length > 0) {
-          // Check MLT preference for stations that allow MLTs
+        if (stationAssignees.length > 0 && isAMShift) {
+          // Check MLT preference for stations that allow MLTs (AM only)
           const allowsMLT = station.require_cls === 1;
           if (allowsMLT) {
             const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
@@ -428,7 +445,7 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
             });
             if (!hasCLS) {
               const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-              warnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
+              warnings.push(`CRITICAL: ${station.name} has no CLS assigned on ${group[0].date} (${shiftName})`);
             }
           }
         }
@@ -448,10 +465,7 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
         if (stationAssignees.length === 1) {
           // If min_staff is 1, having 1 person is fine — not a pivotal concern
           const groupShiftName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
-          const minNeeded = groupShiftName === 'am' ? (station as any).min_staff_am ?? station.min_staff ?? 1
-            : groupShiftName === 'pm' ? (station as any).min_staff_pm ?? station.min_staff ?? 1
-            : groupShiftName === 'night' ? (station as any).min_staff_night ?? station.min_staff ?? 1
-            : station.min_staff ?? 1;
+          const minNeeded = getMinStaffAnalyze(station, groupShiftName);
           if (minNeeded <= 1) continue; // 1 person meets the requirement
 
           const pivotal = employees.find(e => e.id === stationAssignees[0].employee_id);
@@ -482,8 +496,9 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
     }
   }
 
-  // Hours warnings
+  // Hours warnings (exclude admins)
   for (const emp of employees) {
+    if (emp.role === 'admin') continue;
     for (const wk of weekNumbers) {
       const key = `${emp.id}-${wk}`;
       const hours = weekHours.get(key) ?? 0;
@@ -561,11 +576,18 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     empStationMap.get(row.employee_id)!.push(row.station_id);
   }
 
-  // If an employee has no station qualifications, treat them as qualified for ALL stations
+  // If an employee has no station qualifications, treat them as qualified for bench stations
+  // Admin station is only for admin-role employees or those explicitly assigned to it
+  const adminStationObj = stations.find(s => s.name === 'Admin');
+  const benchStationIds = stations.filter(s => s.name !== 'Admin').map(s => s.id);
   const allStationIds = stations.map(s => s.id);
   for (const emp of employees) {
     if (!empStationMap.has(emp.id) || empStationMap.get(emp.id)!.length === 0) {
-      empStationMap.set(emp.id, [...allStationIds]);
+      if (emp.role === 'admin') {
+        empStationMap.set(emp.id, [...allStationIds]);
+      } else {
+        empStationMap.set(emp.id, [...benchStationIds]);
+      }
     }
   }
 
@@ -979,16 +1001,73 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     return station.min_staff ?? 1;
   };
   // MLT slots: 1 if station allows MLTs (require_cls=1), 0 otherwise
-  const getMLTSlots = (station: Station): number => {
+  const getMLTSlots = (station: Station, shiftName?: string): number => {
+    // MLT requirements only apply to AM shift — PM/Night staffing is minimal
+    if (shiftName && shiftName !== 'am') return 0;
     return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
   };
-  // Total staff = CLS needed + MLT slots
-  const getMinStaff = (station: Station, shiftName: string): number => {
-    return getCLSNeeded(station, shiftName) + getMLTSlots(station);
+  // Chemistry and Hematology/UA can absorb 1 extra CLS as overflow
+  const isOverflowStation = (station: Station): boolean => {
+    return station.name === 'Chemistry';
   };
-  // Max CLS = CLS needed (exact, no overstaffing)
+
+  // Total max staff = CLS needed + MLT slots + 1 extra for overflow stations
+  const getMaxStaff = (station: Station, shiftName: string): number => {
+    const base = getCLSNeeded(station, shiftName) + getMLTSlots(station, shiftName);
+    return isOverflowStation(station) ? base + 1 : base;
+  };
+  // Min staff for warnings (the actual requirement, not the overflow cap)
+  const getMinStaff = (station: Station, shiftName: string): number => {
+    return getCLSNeeded(station, shiftName) + getMLTSlots(station, shiftName);
+  };
+  // Max CLS = base CLS count + 1 for overflow stations (Chem/Hema can take 2 CLS)
   const getMaxCLS = (station: Station, shiftName: string): number => {
-    return getCLSNeeded(station, shiftName);
+    const base = getCLSNeeded(station, shiftName);
+    return isOverflowStation(station) ? base + 1 : base;
+  };
+  // Max MLT per station = 1 if station allows, 0 otherwise (hard global rule)
+  const getMaxMLT = (station: Station, shiftName?: string): number => {
+    // MLTs are always allowed (up to 1) at stations that require CLS, even on non-AM shifts
+    // The difference is: AM *requires* MLT, PM/Night *allows* MLT but doesn't require
+    return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+  };
+
+  // ── Global station placement guard ──
+  // Every layer MUST call this before placing anyone at a station.
+  // Returns true if the employee can be placed without violating caps.
+  const canPlaceAtStation = (
+    empId: number,
+    stationId: number,
+    stationMap: Map<number, number>,
+    empRoleMap: Map<number, string>,
+    shiftName: string,
+  ): boolean => {
+    const station = stations.find(s => s.id === stationId);
+    if (!station) return false;
+
+    // Total cap
+    const currentTotal = [...stationMap.values()].filter(v => v === stationId).length;
+    if (currentTotal >= getMaxStaff(station, shiftName)) return false;
+
+    const role = empRoleMap.get(empId);
+
+    // MLT cap: hard limit of 1 MLT per station
+    if (role === 'mlt') {
+      const mltsHere = [...stationMap.entries()].filter(([eid, s]) =>
+        s === stationId && empRoleMap.get(eid) === 'mlt'
+      ).length;
+      if (mltsHere >= getMaxMLT(station, shiftName)) return false;
+    }
+
+    // CLS cap: max CLS per station
+    if (role === 'cls' || role === 'admin') {
+      const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
+        s === stationId && isCLSRole(eid, empRoleMap)
+      ).length;
+      if (clsHere >= getMaxCLS(station, shiftName)) return false;
+    }
+
+    return true;
   };
 
   // Helper: count criticals + pivotals + rotation penalty for scoring passes
@@ -1012,27 +1091,31 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
     for (const [, group] of groups) {
       const shiftName = shfts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
+      const isAM = shiftName === 'am';
       for (const station of realStns) {
-        const minNeeded = getMinStaff(station, shiftName);
-        const maxAllowed = getMinStaff(station, shiftName);
         const stationAssignees = group.filter(a => a.station_id === station.id);
 
-        // Understaffed
-        if (stationAssignees.length < minNeeded) {
-          const dow = getDow(group[0].date);
-          const isWkend = dow === 0 || dow === 6;
-          const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
-          if (!(isWkend && isHemaOrChem)) criticals++;
+        // Only score AM per-station issues — PM/Night have too few staff to fill every station
+        if (isAM) {
+          const minNeeded = getMinStaff(station, shiftName);
+          // Understaffed
+          if (stationAssignees.length < minNeeded) {
+            const dow = getDow(group[0].date);
+            const isWkend = dow === 0 || dow === 6;
+            const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
+            if (!(isWkend && isHemaOrChem)) criticals++;
+          }
+          // 2+ MLTs at same station
+          const mltCount = stationAssignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
+          if (mltCount > 1) criticals += 3 * (mltCount - 1);
+          // Missing CLS at require_cls station
+          if (station.require_cls === 1 && stationAssignees.length > 0) {
+            if (!stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap))) pivotals++;
+          }
         }
-        // Overstaffed
-        if (stationAssignees.length > maxAllowed) criticals += 10;
-        // 2+ MLTs at same station
-        const mltCount = stationAssignees.filter(a => empRoleMap.get(a.employee_id) === 'mlt').length;
-        if (mltCount > 1) criticals += 3 * (mltCount - 1);
-        // Missing CLS at require_cls station
-        if (station.require_cls === 1 && stationAssignees.length > 0) {
-          if (!stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap))) pivotals++;
-        }
+
+        // Overstaffed check applies to all shifts
+        if (stationAssignees.length > getMaxStaff(station, shiftName)) criticals += 10;
       }
     }
 
@@ -1193,6 +1276,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       mltHistory: Map<string, number>,
       lastWeekMLT: Map<number, number>,
       passIdx: number,
+      shiftName: string,
     ) {
       const mltStations = realStations.filter(s => s.require_cls === 1);
       // Available MLTs: not locked, not admin-parked, not per-diem, actual MLT role
@@ -1208,13 +1292,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       // Deduplicate (same employee may appear in pool for multiple days in the week)
       const mltPool = [...new Set(availableMLTs)];
 
-      // Pre-lock MLTs with only 1 bench station — they MUST go there
+      // Pre-lock MLTs with only 1 bench station — they MUST go there (max 1 MLT per station)
       const lockedMLTStations = new Set<number>();
       for (const empId of mltPool) {
         const benchQuals = getBenchQuals(empId).filter(sid =>
           mltStations.some(s => s.id === sid)
         );
-        if (benchQuals.length === 1) {
+        if (benchQuals.length === 1 && !lockedMLTStations.has(benchQuals[0])) {
           stationMap.set(empId, benchQuals[0]);
           locked.add(empId);
           lockedMLTStations.add(benchQuals[0]);
@@ -1240,10 +1324,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           }
           // Penalize unfilled stations
           score += (remainingStations.length - assignment.size) * 1000;
-          // Penalize 2+ MLTs at same station
+          // Hard reject 2+ MLTs at same station
           const counts = new Map<number, number>();
           for (const [, sid] of assignment) counts.set(sid, (counts.get(sid) ?? 0) + 1);
-          for (const [, c] of counts) if (c > 1) score += 50000 * (c - 1);
+          for (const [, c] of counts) if (c > 1) return; // skip invalid assignment
 
           if (score < bestMLTScore) {
             bestMLTScore = score;
@@ -1342,6 +1426,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       weekStationThisWeek: Map<number, number>,
       shiftName: string,
       passIdx: number,
+      overflowBalance: Map<number, number>,
     ) {
       const clsEmps = pool.filter(a =>
         !locked.has(a.employee_id)
@@ -1351,12 +1436,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       );
       const uniqueCLSIds = [...new Set(clsEmps.map(a => a.employee_id))];
 
-      // Sort: pass 0 = most-constrained-first, subsequent passes = shuffled
+      // Sort: single-station employees always first, then most-constrained or shuffled
+      // This ensures employees like Julie (Micro-only) always get their slot before multi-station CLS
+      const singleStation = uniqueCLSIds.filter(id => getBenchQuals(id).length === 1);
+      const multiStation = uniqueCLSIds.filter(id => getBenchQuals(id).length > 1);
       let orderedCLS: number[];
       if (passIdx === 0) {
-        orderedCLS = [...uniqueCLSIds].sort((a, b) => getBenchQuals(a).length - getBenchQuals(b).length);
+        orderedCLS = [...singleStation, ...multiStation.sort((a, b) => getBenchQuals(a).length - getBenchQuals(b).length)];
       } else {
-        orderedCLS = shuffle(uniqueCLSIds);
+        orderedCLS = [...singleStation, ...shuffle(multiStation)];
       }
 
       // Count current station occupancy from stationMap
@@ -1378,20 +1466,23 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           const current = stationCount.get(sid) ?? 0;
           const minNeeded = getMinStaff(station, shiftName);
-          // CLS cap: reserve MLT slots (e.g., Micro max 3 with 1 MLT = 2 CLS max)
+
+          // Hard block: station meets its base requirement — Layer 4 only fills minimums
+          // Overflow (2nd CLS at Chem/Hema) is handled by Layer 7
+          if (current >= minNeeded) continue;
+
           const clsCount = [...stationMap.entries()].filter(([eid, s]) =>
             s === sid && isCLSRole(eid, empRoleMap)
           ).length;
-          const maxCLS = getMaxCLS(station, shiftName);
+          const baseCLSCap = getCLSNeeded(station, shiftName);
 
-          // Hard block: CLS slots full
-          if (clsCount >= maxCLS) continue;
+          // Hard block: base CLS slots full (no overflow in Layer 4)
+          if (clsCount >= baseCLSCap) continue;
 
           let score = 0;
 
           // Staffing need: negative = urgently needs people (must dominate rotation concerns)
-          if (current < minNeeded) score -= 5000 * (minNeeded - current);
-          else score += 100;
+          score -= 5000 * (minNeeded - current);
 
           // Rotation history
           const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
@@ -1428,6 +1519,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           locked.add(empId);
           stationCount.set(bestStation, (stationCount.get(bestStation) ?? 0) + 1);
           rotHistory.set(`${empId}-${bestStation}`, (rotHistory.get(`${empId}-${bestStation}`) ?? 0) + 1);
+          // Track overflow CLS at Chem/Hema for monthly balance
+          const bStation = realStations.find(s => s.id === bestStation);
+          if (bStation && isOverflowStation(bStation)) {
+            const prevCount = stationCount.get(bestStation) ?? 0;
+            if (prevCount > getMinStaff(bStation, shiftName)) {
+              overflowBalance.set(bestStation, (overflowBalance.get(bestStation) ?? 0) + 1);
+            }
+          }
           weekStationThisWeek.set(empId, bestStation);
         }
       }
@@ -1648,10 +1747,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             if (assignment.get(ap.employee_id) === prefStation) {
               score -= 5000;
             }
-            // Penalize 2+ MLTs at same station
+            // Hard reject 2+ MLTs at same station
             const counts = new Map<number, number>();
             for (const [, sid] of assignment) counts.set(sid, (counts.get(sid) ?? 0) + 1);
-            for (const [, c] of counts) if (c > 1) score += 50000 * (c - 1);
+            for (const [, c] of counts) if (c > 1) return; // skip invalid assignment
 
             if (score < bestScore) {
               bestScore = score;
@@ -1772,14 +1871,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       locked: Set<number>,
       stationMap: Map<number, number>,
       shiftName: string,
+      overflowBalance: Map<number, number>,
     ) {
       for (const a of pool) {
         if (stationMap.has(a.employee_id)) continue;
 
-        // If employee has Admin in their station qualifications, send to Admin
-        // (admin-role employees are handled in Layer 3, but admin-parked like Shayna may reach here)
-        const allQuals = empStationMap.get(a.employee_id) ?? [];
-        if (adminStation && allQuals.includes(adminStation.id)) {
+        // Only send actual admin-role or admin-parked employees (like Shayna) to Admin station
+        if (adminStation && (empRoleMap.get(a.employee_id) === 'admin' || isAdminParked(a.employee_id))) {
           stationMap.set(a.employee_id, adminStation.id);
           continue;
         }
@@ -1788,26 +1886,20 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         const benchQuals = getBenchQuals(a.employee_id);
         const empRole = empRoleMap.get(a.employee_id);
         let bestSid = -1;
-        let bestNeed = -Infinity;
+        let bestScore = Infinity;
         for (const sid of benchQuals) {
           const station = realStations.find(s => s.id === sid);
           if (!station) continue;
+          // canPlaceAtStation handles all caps (total, CLS, MLT)
+          if (!canPlaceAtStation(a.employee_id, sid, stationMap as any, empRoleMap, shiftName)) continue;
           const current = [...stationMap.values()].filter(v => v === sid).length;
-          const maxAllowed = getMinStaff(station, shiftName);
-          if (current >= maxAllowed) continue;
-          // Respect role-specific caps (CLS can't exceed CLS slots, MLT can't exceed 1)
-          if (isCLSRole(a.employee_id, empRoleMap)) {
-            const clsHere = [...stationMap.entries()].filter(([eid, s]) =>
-              s === sid && isCLSRole(eid, empRoleMap)).length;
-            if (clsHere >= getMaxCLS(station, shiftName)) continue;
+          const minNeeded = getMinStaff(station, shiftName);
+          // Prefer stations that actually need staff; overflow slots are last resort
+          let score = current - minNeeded; // negative = understaffed, positive = overflow
+          if (score >= 0 && isOverflowStation(station)) {
+            score += (overflowBalance.get(sid) ?? 0); // balance Chem/Hema overflow
           }
-          if (empRole === 'mlt') {
-            const mltsHere = [...stationMap.entries()].filter(([eid, s]) =>
-              s === sid && empRoleMap.get(eid) === 'mlt').length;
-            if (mltsHere >= 1) continue;
-          }
-          const need = getMinStaff(station, shiftName) - current;
-          if (need > bestNeed) { bestNeed = need; bestSid = sid; }
+          if (score < bestScore) { bestScore = score; bestSid = sid; }
         }
         if (bestSid >= 0) {
           stationMap.set(a.employee_id, bestSid);
@@ -1853,19 +1945,26 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               }
             }
           }
-          // Final fallback: if still unassigned, place at least-staffed station (generates warning)
+          // Final fallback: use canPlaceAtStation to find any valid station
           if (!stationMap.has(a.employee_id)) {
+            // The guarded stationMap.set will reject anything that violates caps,
+            // so just try each qualified station in need-order
             let fallbackSid = -1;
-            let fallbackNeed = -Infinity;
+            let fallbackScore = Infinity;
             for (const sid of benchQuals) {
+              if (!canPlaceAtStation(a.employee_id, sid, stationMap as any, empRoleMap, shiftName)) continue;
               const station = realStations.find(s => s.id === sid);
               if (!station) continue;
               const current = [...stationMap.values()].filter(v => v === sid).length;
-              const need = getMinStaff(station, shiftName) - current;
-              if (need > fallbackNeed) { fallbackNeed = need; fallbackSid = sid; }
+              let score = current - getMinStaff(station, shiftName);
+              if (score >= 0 && isOverflowStation(station)) score += (overflowBalance.get(sid) ?? 0);
+              if (score < fallbackScore) { fallbackScore = score; fallbackSid = sid; }
             }
             if (fallbackSid >= 0) {
               stationMap.set(a.employee_id, fallbackSid);
+            } else if (adminStation) {
+              // Absolutely no bench station can take them — send to Admin
+              stationMap.set(a.employee_id, adminStation.id);
             }
           }
         }
@@ -1892,6 +1991,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       }
       const weekStationThisWeek = new Map<number, number>();
       const bbRotation = new Map<number, number>();
+      // Track overflow CLS at Chem/Hema for monthly balance
+      const overflowBalance = new Map<number, number>();
 
       // Process each day+shift group chronologically
       let currentWeek = '';
@@ -1919,18 +2020,484 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         // Build the pool: all employees working this day+shift
         const pool = group;
         const locked = new Set<number>();
+        // Guarded station map — wraps a real Map but enforces caps on set()
         const stationMap = new Map<number, number>();
+        const _origSet = stationMap.set.bind(stationMap);
+        stationMap.set = function(empId: number, stationId: number): Map<number, number> {
+          // Admin station: only admin-role employees or those with Admin explicitly in their stations
+          if (adminStation && stationId === adminStation.id) {
+            const role = empRoleMap.get(empId);
+            const empStations = empStationMap.get(empId) ?? [];
+            if (role === 'admin' || empStations.includes(adminStation.id)) {
+              return _origSet(empId, stationId);
+            }
+            return this; // reject — non-admin without Admin in their station list
+          }
+          // If employee is already at a station, temporarily remove for cap check
+          const prev = this.get(empId);
+          if (prev !== undefined) this.delete(empId);
+          // Check caps
+          if (!canPlaceAtStation(empId, stationId, this, empRoleMap, shiftName)) {
+            // Restore previous assignment if we removed it
+            if (prev !== undefined) _origSet(empId, prev);
+            return this;
+          }
+          return _origSet(empId, stationId);
+        };
 
         // Run the 7 layers in order
         layer1_bloodBank(pool, locked, stationMap, bbRotation, passIdx);
-        layer2_mltPlacement(pool, locked, stationMap, mltHistory, lastWeekMLT, passIdx);
+        layer2_mltPlacement(pool, locked, stationMap, mltHistory, lastWeekMLT, passIdx, shiftName);
         layer3_adminPlacement(pool, locked, stationMap, shiftName);
-        layer4_clsRotation(pool, locked, stationMap, rotHistory, lastWeekStation, weekStationThisWeek, shiftName, passIdx);
+        layer4_clsRotation(pool, locked, stationMap, rotHistory, lastWeekStation, weekStationThisWeek, shiftName, passIdx, overflowBalance);
         layer5_shaynaFill(pool, locked, stationMap, shiftName);
         layer6_perDiemFill(pool, locked, stationMap, shiftName);
-        layer7_overflow(pool, locked, stationMap, shiftName);
+        layer7_overflow(pool, locked, stationMap, shiftName, overflowBalance);
         // Run gap-fill last — after everyone is placed, reshuffle to fix remaining understaffing
         gapFill(pool, locked, stationMap, shiftName);
+
+        // ── Repair pass: validate and fix by swapping ──
+        // Runs iteratively until no more improvements can be made
+        for (let repairIter = 0; repairIter < 10; repairIter++) {
+          let changed = false;
+
+          // Step 1: Place unassigned employees at understaffed bench stations
+          for (const a of pool) {
+            if (stationMap.has(a.employee_id)) continue;
+            const role = empRoleMap.get(a.employee_id);
+            const quals = (empStationMap.get(a.employee_id) ?? []).filter(sid =>
+              !adminStation || sid !== adminStation.id
+            );
+            // Find the most understaffed station this employee is qualified for
+            let bestSid = -1;
+            let bestDeficit = 0;
+            for (const sid of quals) {
+              const station = realStations.find(s => s.id === sid);
+              if (!station) continue;
+              if (!canPlaceAtStation(a.employee_id, sid, stationMap as any, empRoleMap, shiftName)) continue;
+              const current = [...stationMap.values()].filter(v => v === sid).length;
+              const deficit = getMinStaff(station, shiftName) - current;
+              if (deficit > bestDeficit) { bestDeficit = deficit; bestSid = sid; }
+            }
+            if (bestSid >= 0) {
+              stationMap.set(a.employee_id, bestSid);
+              changed = true;
+            }
+          }
+
+          // Step 1b: Move overflow employees from overstaffed stations to understaffed stations
+          for (const station of realStations) {
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const current = stationAssignees.length;
+            const minNeeded = getMinStaff(station, shiftName);
+            if (current <= minNeeded) continue; // not overstaffed
+
+            // Find employees we can move to understaffed stations
+            for (const [eid] of stationAssignees) {
+              // Re-check current count (may have changed from prior moves)
+              const nowCount = [...stationMap.values()].filter(v => v === station.id).length;
+              if (nowCount <= minNeeded) break; // no longer overstaffed
+
+              const quals = (empStationMap.get(eid) ?? []).filter(sid =>
+                !adminStation || sid !== adminStation.id
+              );
+              // Find the most understaffed station this employee can go to
+              let bestSid = -1;
+              let bestDeficit = 0;
+              for (const sid of quals) {
+                if (sid === station.id) continue;
+                const target = realStations.find(s => s.id === sid);
+                if (!target) continue;
+                const targetCurrent = [...stationMap.values()].filter(v => v === sid).length;
+                const targetMin = getMinStaff(target, shiftName);
+                const deficit = targetMin - targetCurrent;
+                if (deficit <= 0) continue;
+                // Check we can place there (respects MLT cap, CLS cap, etc)
+                if (!canPlaceAtStation(eid, sid, stationMap as any, empRoleMap, shiftName)) continue;
+                if (deficit > bestDeficit) { bestDeficit = deficit; bestSid = sid; }
+              }
+              if (bestSid >= 0) {
+                stationMap.delete(eid);
+                _origSet(eid, bestSid);
+                changed = true;
+              }
+            }
+          }
+
+          // Step 1c: Chain swap — move someone from a mid station to an understaffed station,
+          // then backfill the mid station with an overflow employee from an overstaffed station
+          for (const underStation of realStations) {
+            const underCount = [...stationMap.values()].filter(v => v === underStation.id).length;
+            const underMin = getMinStaff(underStation, shiftName);
+            if (underCount >= underMin) continue; // not understaffed
+
+            let fixed = false;
+            for (const midStation of realStations) {
+              if (midStation.id === underStation.id) continue;
+              const midAssignees = [...stationMap.entries()].filter(([, sid]) => sid === midStation.id);
+              const midMin = getMinStaff(midStation, shiftName);
+
+              // Find someone at midStation qualified for underStation
+              for (const [midEid] of midAssignees) {
+                if (!(empStationMap.get(midEid) ?? []).includes(underStation.id)) continue;
+                if (!canPlaceAtStation(midEid, underStation.id, stationMap as any, empRoleMap, shiftName)) continue;
+
+                // Moving them would leave midStation short — find an overflow employee to backfill
+                if (midAssignees.length - 1 < midMin) {
+                  // Need a backfill from an overstaffed station
+                  let backfillFound = false;
+                  for (const overStation of realStations) {
+                    if (overStation.id === underStation.id || overStation.id === midStation.id) continue;
+                    const overCount = [...stationMap.values()].filter(v => v === overStation.id).length;
+                    const overMin = getMinStaff(overStation, shiftName);
+                    if (overCount <= overMin) continue; // not overstaffed
+
+                    const overAssignees = [...stationMap.entries()].filter(([, sid]) => sid === overStation.id);
+                    for (const [overEid] of overAssignees) {
+                      if (!(empStationMap.get(overEid) ?? []).includes(midStation.id)) continue;
+                      // Execute chain: midEid → underStation, overEid → midStation
+                      stationMap.delete(midEid);
+                      stationMap.delete(overEid);
+                      _origSet(midEid, underStation.id);
+                      _origSet(overEid, midStation.id);
+                      changed = true;
+                      backfillFound = true;
+                      break;
+                    }
+                    if (backfillFound) break;
+                  }
+                  if (backfillFound) { fixed = true; break; }
+
+                  // Also check unassigned employees as backfill
+                  for (const a of pool) {
+                    if (stationMap.has(a.employee_id)) continue;
+                    if (!(empStationMap.get(a.employee_id) ?? []).includes(midStation.id)) continue;
+                    if (!canPlaceAtStation(a.employee_id, midStation.id, stationMap as any, empRoleMap, shiftName)) continue;
+                    // Execute chain: midEid → underStation, unassigned → midStation
+                    stationMap.delete(midEid);
+                    _origSet(midEid, underStation.id);
+                    stationMap.set(a.employee_id, midStation.id);
+                    changed = true;
+                    fixed = true;
+                    break;
+                  }
+                  if (fixed) break;
+                } else {
+                  // midStation can afford to lose one — just move directly
+                  stationMap.delete(midEid);
+                  _origSet(midEid, underStation.id);
+                  changed = true;
+                  fixed = true;
+                  break;
+                }
+              }
+              if (fixed) break;
+            }
+          }
+
+          // Step 2: Fix stations missing a CLS by swapping with overstaffed stations
+          for (const station of realStations) {
+            if (station.require_cls !== 1) continue;
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const hasCLS = stationAssignees.some(([eid]) => isCLSRole(eid, empRoleMap));
+            if (hasCLS) continue;
+            if (stationAssignees.length === 0) continue;
+
+            // This station has people but no CLS — find a CLS to swap in
+            for (const otherStation of realStations) {
+              if (otherStation.id === station.id) continue;
+              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
+              const otherCLSList = otherAssignees.filter(([eid]) => isCLSRole(eid, empRoleMap));
+              // Only take from stations with surplus CLS (2+ CLS, or 1+ CLS if station is above min)
+              const otherMin = getMinStaff(otherStation, shiftName);
+              if (otherCLSList.length < 2 && otherAssignees.length <= otherMin) continue;
+
+              // Find a CLS from the other station qualified for this station
+              for (const [clsId] of otherCLSList) {
+                if (!(empStationMap.get(clsId) ?? []).includes(station.id)) continue;
+                // Find someone at this station who can backfill at the other station
+                const swapCandidate = stationAssignees.find(([eid]) =>
+                  eid !== clsId && (empStationMap.get(eid) ?? []).includes(otherStation.id)
+                );
+                if (swapCandidate) {
+                  // Swap: CLS → this station, other person → other station
+                  stationMap.delete(clsId);
+                  stationMap.delete(swapCandidate[0]);
+                  _origSet(clsId, station.id);
+                  _origSet(swapCandidate[0], otherStation.id);
+                  changed = true;
+                  break;
+                }
+                // Or just move the CLS directly if the other station still meets min
+                const otherCurrent = otherAssignees.length;
+                if (otherCurrent - 1 >= getMinStaff(otherStation, shiftName) - getMLTSlots(otherStation, shiftName)) {
+                  stationMap.delete(clsId);
+                  _origSet(clsId, station.id);
+                  changed = true;
+                  break;
+                }
+              }
+              if ([...stationMap.entries()].filter(([, sid]) => sid === station.id).some(([eid]) => isCLSRole(eid, empRoleMap))) break;
+            }
+          }
+
+          // Step 3: Fix duplicate MLTs — if a station has 2 MLTs, move one to a station that needs an MLT
+          for (const station of realStations) {
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const mltsHere = stationAssignees.filter(([eid]) => empRoleMap.get(eid) === 'mlt');
+            if (mltsHere.length <= 1) continue;
+
+            // Move extra MLTs to stations that need one
+            for (let i = 1; i < mltsHere.length; i++) {
+              const [extraMLT] = mltsHere[i];
+              const quals = (empStationMap.get(extraMLT) ?? []).filter(sid =>
+                !adminStation || sid !== adminStation.id
+              );
+              let placed = false;
+              for (const sid of quals) {
+                if (sid === station.id) continue;
+                const targetStation = realStations.find(s => s.id === sid);
+                if (!targetStation || targetStation.require_cls !== 1) continue;
+                const targetMLTs = [...stationMap.entries()].filter(([eid, s]) =>
+                  s === sid && empRoleMap.get(eid) === 'mlt'
+                ).length;
+                if (targetMLTs >= 1) continue; // already has an MLT
+                if (canPlaceAtStation(extraMLT, sid, stationMap as any, empRoleMap, shiftName)) {
+                  stationMap.set(extraMLT, sid);
+                  placed = true;
+                  changed = true;
+                  break;
+                }
+              }
+              // If can't place on bench, send to Admin (if admin-parked)
+              if (!placed && adminStation && isAdminParked(extraMLT)) {
+                stationMap.set(extraMLT, adminStation.id);
+                changed = true;
+              }
+            }
+          }
+
+          // Step 4: Fix MLTs on stations that already have one — try swapping with a station that needs MLT
+          for (const station of realStations) {
+            if (station.require_cls !== 1) continue;
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const hasMLT = stationAssignees.some(([eid]) => empRoleMap.get(eid) === 'mlt');
+            if (hasMLT) continue;
+            // Station needs an MLT — find one at a station that has excess or doesn't need one
+            for (const otherStation of realStations) {
+              if (otherStation.id === station.id) continue;
+              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
+              const otherMLTs = otherAssignees.filter(([eid]) => empRoleMap.get(eid) === 'mlt');
+              // Only take from stations with 2+ MLTs or stations that don't require MLTs
+              if (otherMLTs.length === 0) continue;
+              if (otherStation.require_cls === 1 && otherMLTs.length <= 1) continue;
+
+              for (const [mltId] of otherMLTs) {
+                if (!(empStationMap.get(mltId) ?? []).includes(station.id)) continue;
+                if (canPlaceAtStation(mltId, station.id, stationMap as any, empRoleMap, shiftName)) {
+                  stationMap.set(mltId, station.id);
+                  changed = true;
+                  break;
+                }
+              }
+              if ([...stationMap.entries()].filter(([, sid]) => sid === station.id).some(([eid]) => empRoleMap.get(eid) === 'mlt')) break;
+            }
+          }
+
+          // Step 5: Move non-admin employees from Admin station to bench overflow slots
+          if (adminStation) {
+            const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
+            for (const [eid] of adminAssignees) {
+              const role = empRoleMap.get(eid);
+              if (role === 'admin') continue; // actual admins stay at Admin
+              const quals = (empStationMap.get(eid) ?? []).filter(sid => sid !== adminStation.id);
+              // Try to place at understaffed stations first, then overflow stations
+              let bestSid = -1;
+              let bestPriority = -1;
+              for (const sid of quals) {
+                const station = realStations.find(s => s.id === sid);
+                if (!station) continue;
+                if (!canPlaceAtStation(eid, sid, stationMap as any, empRoleMap, shiftName)) continue;
+                const current = [...stationMap.values()].filter(v => v === sid).length;
+                const minNeeded = getMinStaff(station, shiftName);
+                const deficit = minNeeded - current;
+                // Priority: understaffed (deficit>0) > overflow slot > nothing
+                const priority = deficit > 0 ? 100 + deficit : (current < getMaxStaff(station, shiftName) ? 1 : 0);
+                if (priority > bestPriority) { bestPriority = priority; bestSid = sid; }
+              }
+              if (bestSid >= 0) {
+                stationMap.delete(eid);
+                _origSet(eid, bestSid);
+                changed = true;
+              }
+            }
+          }
+
+          // Step 6: Last resort — move admin-role employees from Admin to understaffed bench stations
+          // Only fires when no CLS/MLT could fill the gap (Steps 1-5 already ran)
+          if (adminStation) {
+            for (const underStation of realStations) {
+              if (underStation.id === adminStation.id) continue;
+              const underCount = [...stationMap.values()].filter(v => v === underStation.id).length;
+              const underMin = getMinStaff(underStation, shiftName);
+              if (underCount >= underMin) continue;
+
+              // Check if ANY non-admin employee could still fill this — skip if so
+              const nonAdminCanFill = pool.some(a => {
+                const r = empRoleMap.get(a.employee_id);
+                if (r === 'admin') return false;
+                if (stationMap.get(a.employee_id) === underStation.id) return false; // already there
+                if (!(empStationMap.get(a.employee_id) ?? []).includes(underStation.id)) return false;
+                return canPlaceAtStation(a.employee_id, underStation.id, stationMap as any, empRoleMap, shiftName);
+              });
+              if (nonAdminCanFill) continue;
+
+              // No CLS/MLT can fill — try admin employees at Admin station
+              const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
+              for (const [eid] of adminAssignees) {
+                const role = empRoleMap.get(eid);
+                if (role !== 'admin') continue;
+                if (!(empStationMap.get(eid) ?? []).includes(underStation.id)) continue;
+                if (!canPlaceAtStation(eid, underStation.id, stationMap as any, empRoleMap, shiftName)) continue;
+                // Move admin to understaffed bench station
+                stationMap.delete(eid);
+                _origSet(eid, underStation.id);
+                changed = true;
+                break;
+              }
+            }
+
+            // Step 6b: Admin chain swap — admin covers station X, freeing CLS at X to move to understaffed station Y
+            for (const underStation of realStations) {
+              if (underStation.id === adminStation.id) continue;
+              const underCount = [...stationMap.values()].filter(v => v === underStation.id).length;
+              const underMin = getMinStaff(underStation, shiftName);
+              if (underCount >= underMin) continue;
+
+              // Find a bench station that has someone qualified for underStation
+              for (const midStation of realStations) {
+                if (midStation.id === underStation.id || midStation.id === adminStation.id) continue;
+                const midAssignees = [...stationMap.entries()].filter(([, sid]) => sid === midStation.id);
+
+                for (const [midEid] of midAssignees) {
+                  if (!(empStationMap.get(midEid) ?? []).includes(underStation.id)) continue;
+                  if (!canPlaceAtStation(midEid, underStation.id, stationMap as any, empRoleMap, shiftName)) continue;
+                  if (midAssignees.length - 1 >= getMinStaff(midStation, shiftName)) {
+                    // midStation can afford to lose one — move directly
+                    stationMap.delete(midEid);
+                    _origSet(midEid, underStation.id);
+                    changed = true;
+                    break;
+                  }
+                  // midStation would be short — can an admin backfill?
+                  const adminAssignees2 = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
+                  for (const [adminEid] of adminAssignees2) {
+                    if (empRoleMap.get(adminEid) !== 'admin') continue;
+                    if (!(empStationMap.get(adminEid) ?? []).includes(midStation.id)) continue;
+                    // Temporarily remove midEid to check if admin can fit at midStation
+                    stationMap.delete(midEid);
+                    if (!canPlaceAtStation(adminEid, midStation.id, stationMap as any, empRoleMap, shiftName)) {
+                      _origSet(midEid, midStation.id); // restore
+                      continue;
+                    }
+                    // Chain: midEid → underStation, adminEid → midStation
+                    stationMap.delete(adminEid);
+                    _origSet(midEid, underStation.id);
+                    _origSet(adminEid, midStation.id);
+                    changed = true;
+                    break;
+                  }
+                  if (changed) break;
+                }
+                if ([...stationMap.values()].filter(v => v === underStation.id).length >= underMin) break;
+              }
+            }
+          }
+
+          // Step 7: Free admins from bench stations — if a non-admin can cover their spot,
+          // send the admin back to Admin so they can do admin duties
+          if (adminStation) {
+            for (const benchStation of realStations) {
+              const benchAssignees = [...stationMap.entries()].filter(([, sid]) => sid === benchStation.id);
+              // Find admins at this bench station
+              const adminsHere = benchAssignees.filter(([eid]) => empRoleMap.get(eid) === 'admin');
+              if (adminsHere.length === 0) continue;
+
+              for (const [adminEid] of adminsHere) {
+                // Would removing this admin understaff the bench station?
+                const countWithout = benchAssignees.length - 1;
+                const minNeeded = getMinStaff(benchStation, shiftName);
+                const wouldBeShort = countWithout < minNeeded;
+
+                // Look for a non-admin who can replace this admin at the bench station
+                // Check overflow employees (at overflow stations or unassigned)
+                let replaced = false;
+
+                // Check unassigned employees first
+                // Must remove admin first so canPlaceAtStation sees the freed slot
+                for (const a of pool) {
+                  if (stationMap.has(a.employee_id)) continue;
+                  const r = empRoleMap.get(a.employee_id);
+                  if (r === 'admin') continue;
+                  if (!(empStationMap.get(a.employee_id) ?? []).includes(benchStation.id)) continue;
+                  // Temporarily remove admin to check if replacement can fit
+                  stationMap.delete(adminEid);
+                  if (!canPlaceAtStation(a.employee_id, benchStation.id, stationMap as any, empRoleMap, shiftName)) {
+                    _origSet(adminEid, benchStation.id); // restore
+                    continue;
+                  }
+                  // Swap: unassigned → bench, admin → Admin
+                  _origSet(a.employee_id, benchStation.id);
+                  _origSet(adminEid, adminStation.id);
+                  replaced = true;
+                  changed = true;
+                  break;
+                }
+                if (replaced) continue;
+
+                // Check employees at overstaffed stations (including overflow at Chem)
+                for (const otherStation of [...realStations, adminStation]) {
+                  if (otherStation.id === benchStation.id) continue;
+                  if (otherStation.id === adminStation.id) continue; // don't pull from Admin
+                  const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
+                  const otherMin = otherStation.name === 'Admin' ? 1 : getMinStaff(otherStation, shiftName);
+                  if (otherAssignees.length <= otherMin) continue; // not overstaffed
+
+                  for (const [otherEid] of otherAssignees) {
+                    const r = empRoleMap.get(otherEid);
+                    if (r === 'admin') continue; // don't swap admin for admin
+                    if (!(empStationMap.get(otherEid) ?? []).includes(benchStation.id)) continue;
+                    // Temporarily remove both to check caps
+                    stationMap.delete(adminEid);
+                    stationMap.delete(otherEid);
+                    if (!canPlaceAtStation(otherEid, benchStation.id, stationMap as any, empRoleMap, shiftName)) {
+                      _origSet(adminEid, benchStation.id); // restore admin
+                      _origSet(otherEid, otherStation.id); // restore other
+                      continue;
+                    }
+                    // Swap: overflow → bench, admin → Admin
+                    _origSet(otherEid, benchStation.id);
+                    _origSet(adminEid, adminStation.id);
+                    replaced = true;
+                    changed = true;
+                    break;
+                  }
+                  if (replaced) break;
+                }
+                if (replaced) continue;
+
+                // If bench won't be short without the admin and it's not critical, just move admin back
+                if (!wouldBeShort) {
+                  stationMap.delete(adminEid);
+                  _origSet(adminEid, adminStation.id);
+                  changed = true;
+                }
+              }
+            }
+          }
+
+          if (!changed) break;
+        }
 
         // Apply station assignments to the result assignments
         for (const a of group) {
@@ -1945,14 +2512,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
         const shiftLabel = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
         const date = group[0].date;
+        const isAMShift = shiftName === 'am';
 
         for (const station of realStations) {
           const stationAssignees = group.filter(a => a.station_id === station.id);
           const minNeeded = getMinStaff(station, shiftName);
-          const maxAllowed = getMinStaff(station, shiftName);
 
-          // CRITICAL: understaffed
-          if (stationAssignees.length < minNeeded) {
+          // CRITICAL: understaffed (AM only — PM/Night have too few staff to fill every station)
+          if (isAMShift && stationAssignees.length < minNeeded) {
             const dow = getDow(date);
             const isWkend = dow === 0 || dow === 6;
             const isHemaOrChem = station.name === 'Hematology/UA' || station.name === 'Chemistry';
@@ -1961,13 +2528,26 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
           }
 
-          // WARNING: overstaffed
-          if (stationAssignees.length > maxAllowed) {
-            passWarnings.push(`WARNING: ${station.name} has ${stationAssignees.length} staff (max ${maxAllowed}) on ${date} (${shiftLabel})`);
+          // WARNING: overstaffed (beyond overflow cap)
+          if (stationAssignees.length > getMaxStaff(station, shiftName)) {
+            passWarnings.push(`WARNING: ${station.name} has ${stationAssignees.length} staff (max ${getMaxStaff(station, shiftName)}) on ${date} (${shiftLabel})`);
           }
 
-          if (stationAssignees.length > 0) {
-            // PIVOTAL: no MLT at require_cls station
+          // SUGGESTION: overflow CLS at Chem/Hema (2 CLS = extra help, not required)
+          if (isOverflowStation(station)) {
+            const clsHere = stationAssignees.filter(a => isCLSRole(a.employee_id, empRoleMap)).length;
+            if (clsHere > getCLSNeeded(station, shiftName)) {
+              const extraCLS = stationAssignees.filter(a => isCLSRole(a.employee_id, empRoleMap));
+              const extraName = extraCLS.length > 0 ? extraCLS[extraCLS.length - 1] : null;
+              if (extraName) {
+                const name = employees.find(e => e.id === extraName.employee_id)?.name ?? 'CLS';
+                passWarnings.push(`SUGGESTION: ${name} is extra CLS at ${station.name} on ${date} (${shiftLabel}) — can be moved to another station if needed`);
+              }
+            }
+          }
+
+          if (stationAssignees.length > 0 && isAMShift) {
+            // PIVOTAL: no MLT at require_cls station (AM only)
             if (station.require_cls === 1) {
               const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
               if (!hasMLT) {
@@ -1980,11 +2560,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               }
             }
 
-            // PIVOTAL: no CLS at require_cls station
+            // PIVOTAL: no CLS at require_cls station (AM only)
             if (station.require_cls === 1) {
               const hasCLS = stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap));
               if (!hasCLS) {
-                passWarnings.push(`PIVOTAL: ${station.name} has no CLS assigned on ${date} (${shiftLabel})`);
+                passWarnings.push(`CRITICAL: ${station.name} has no CLS assigned on ${date} (${shiftLabel})`);
               }
             }
           }
@@ -2001,6 +2581,51 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         if (qualifiedIds.length <= 1 && qualifiedIds.length > 0) {
           const name = employees.find(e => e.id === qualifiedIds[0])?.name;
           passWarnings.push(`CRITICAL: ${name} is the ONLY person qualified for ${station.name} — no backup`);
+        }
+      }
+
+      // AM MLT overflow — detect MLTs on AM that couldn't get a bench station
+      // Aggregate per-employee instead of per-day to reduce noise
+      const amShift = shifts.find(s => s.name.toLowerCase() === 'am');
+      if (amShift) {
+        const mltStations = realStations.filter(s => s.require_cls === 1);
+        // Find AM dates missing an MLT at a bench station
+        const datesNeedingMLT: string[] = [];
+        for (const [, group] of shiftDateGroups) {
+          if (group[0].shift_id !== amShift.id) continue;
+          for (const station of mltStations) {
+            const stationAssignees = group.filter(a => a.station_id === station.id);
+            const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
+            if (!hasMLT && stationAssignees.length > 0) {
+              datesNeedingMLT.push(group[0].date);
+              break;
+            }
+          }
+        }
+        // Aggregate: per-MLT, collect all dates they have no bench station
+        const mltNoBenchDates = new Map<number, string[]>();
+        for (const [, group] of shiftDateGroups) {
+          if (group[0].shift_id !== amShift.id) continue;
+          const date = group[0].date;
+          for (const a of group) {
+            if (empRoleMap.get(a.employee_id) !== 'mlt') continue;
+            const stationId = a.station_id;
+            const isOnBench = stationId !== null && realStations.some(s => s.id === stationId);
+            if (!isOnBench) {
+              const dates = mltNoBenchDates.get(a.employee_id) ?? [];
+              dates.push(date);
+              mltNoBenchDates.set(a.employee_id, dates);
+            }
+          }
+        }
+        for (const [empId, dates] of mltNoBenchDates) {
+          const empName = employees.find(e => e.id === empId)?.name ?? `Employee #${empId}`;
+          const suggestions = datesNeedingMLT.filter(d => !dates.includes(d)).slice(0, 3).join(', ');
+          if (suggestions) {
+            passWarnings.push(`SUGGESTION: ${empName} (MLT) has no bench station on ${dates.length} AM days — consider moving to ${suggestions} which need MLT coverage`);
+          } else {
+            passWarnings.push(`SUGGESTION: ${empName} (MLT) has no bench station on ${dates.length} AM days — all bench stations already have MLT coverage`);
+          }
         }
       }
 
@@ -2044,6 +2669,186 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         a.station_id = stationId ?? (null as any);
       }
     }
+
+    // ── PHASE 3b: Per-diem rebalancing & unassigned cleanup ──
+    // Remove per-diem from days where they have no station (unassigned) or where day is overstaffed.
+    // Try to re-place them on understaffed days.
+    const empRoleMapFinal = new Map<number, string>();
+    for (const emp of employees) empRoleMapFinal.set(emp.id, emp.role);
+    const adminStationFinal = stations.find(s => s.name === 'Admin');
+    const realStationsFinal = stations.filter(s => s.name !== 'Admin');
+
+    const getCLSNeededFinal = (station: typeof stations[0], shiftName: string): number => {
+      if (shiftName === 'am') return (station as any).min_staff_am ?? station.min_staff ?? 1;
+      if (shiftName === 'pm') return (station as any).min_staff_pm ?? station.min_staff ?? 1;
+      if (shiftName === 'night') return (station as any).min_staff_night ?? station.min_staff ?? 1;
+      return station.min_staff ?? 1;
+    };
+    const getMLTSlotsFinal = (station: typeof stations[0], shiftName?: string): number => {
+      if (shiftName && shiftName !== 'am') return 0;
+      return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+    };
+    const getMinStaffFinal = (station: typeof stations[0], shiftName: string): number => {
+      return getCLSNeededFinal(station, shiftName) + getMLTSlotsFinal(station, shiftName);
+    };
+
+    // Build a map of shift_id → shift_name for lookups
+    const shiftNameMap = new Map<number, string>();
+    for (const s of shifts) shiftNameMap.set(s.id, s.name?.toLowerCase() ?? '');
+
+    // Step 1: Remove per-diem employees who have no station (unassigned)
+    const removedPerDiem: Assignment[] = [];
+    for (let i = result.length - 1; i >= 0; i--) {
+      const a = result[i];
+      const emp = employees.find(e => e.id === a.employee_id);
+      if (!emp) continue;
+      if (a.station_id !== null) continue; // has a station, keep
+
+      if (emp.employment_type === 'per-diem') {
+        removedPerDiem.push(a);
+        result.splice(i, 1);
+      }
+    }
+
+    // Step 2: Remove per-diem from overstaffed days (all stations at or above min)
+    // Group by shift+date
+    const shiftDateGroupsFinal = new Map<string, Assignment[]>();
+    for (const a of result) {
+      const key = `${a.shift_id}-${a.date}`;
+      if (!shiftDateGroupsFinal.has(key)) shiftDateGroupsFinal.set(key, []);
+      shiftDateGroupsFinal.get(key)!.push(a);
+    }
+
+    for (const [, group] of shiftDateGroupsFinal) {
+      const shiftName = shiftNameMap.get(group[0].shift_id) ?? '';
+      // Check if ALL real stations meet their minimum
+      const allStationsMet = realStationsFinal.every(station => {
+        const count = group.filter(a => a.station_id === station.id).length;
+        return count >= getMinStaffFinal(station, shiftName);
+      });
+      if (!allStationsMet) continue; // day is understaffed somewhere, keep everyone
+
+      // Day is fully staffed. Check for per-diem who are overflow (at Admin or overflow station)
+      for (const a of [...group]) {
+        const emp = employees.find(e => e.id === a.employee_id);
+        if (!emp || emp.employment_type !== 'per-diem') continue;
+
+        // Is this per-diem essential? Check if removing them would understaff their station
+        if (a.station_id === null) {
+          // No station — safe to remove
+          removedPerDiem.push(a);
+          const idx = result.indexOf(a);
+          if (idx >= 0) result.splice(idx, 1);
+          continue;
+        }
+        const station = stations.find(s => s.id === a.station_id);
+        if (!station) continue;
+        const stationCount = group.filter(g => g.station_id === station.id).length;
+        const minNeeded = station.name === 'Admin' ? 1 : getMinStaffFinal(station, shiftName);
+        if (stationCount > minNeeded) {
+          // Station is overstaffed even without this per-diem — remove them
+          removedPerDiem.push(a);
+          const idx = result.indexOf(a);
+          if (idx >= 0) result.splice(idx, 1);
+          // Remove from group too
+          const gi = group.indexOf(a);
+          if (gi >= 0) group.splice(gi, 1);
+        }
+      }
+    }
+
+    // Step 3: Try to place removed per-diem on understaffed days
+    // Rebuild shift+date groups after removals
+    const shiftDateGroupsRebuilt = new Map<string, Assignment[]>();
+    for (const a of result) {
+      const key = `${a.shift_id}-${a.date}`;
+      if (!shiftDateGroupsRebuilt.has(key)) shiftDateGroupsRebuilt.set(key, []);
+      shiftDateGroupsRebuilt.get(key)!.push(a);
+    }
+
+    for (const removed of removedPerDiem) {
+      const emp = employees.find(e => e.id === removed.employee_id);
+      if (!emp) continue;
+      const role = empRoleMapFinal.get(emp.id);
+      const quals = (empStationMap.get(emp.id) ?? []).filter(sid =>
+        !adminStationFinal || sid !== adminStationFinal.id
+      );
+
+      // Find the most understaffed day/shift where this employee could help
+      let bestKey = '';
+      let bestDeficit = 0;
+      let bestStationId = -1;
+
+      for (const [key, group] of shiftDateGroupsRebuilt) {
+        const shiftId = group[0].shift_id;
+        const date = group[0].date;
+        const shiftName = shiftNameMap.get(shiftId) ?? '';
+
+        // Employee must match shift (compare default_shift)
+        const empShift = emp.default_shift;
+        if (empShift !== 'floater' && empShift !== shiftName) continue;
+
+        // Don't put on a day they're already working
+        if (result.some(a => a.employee_id === emp.id && a.date === date)) continue;
+
+        // Check time off
+        if (timeOff.some(to => to.employee_id === emp.id && to.date === date)) continue;
+
+        // Find understaffed station they're qualified for
+        for (const sid of quals) {
+          const station = realStationsFinal.find(s => s.id === sid);
+          if (!station) continue;
+          const count = group.filter(a => a.station_id === sid).length;
+          const min = getMinStaffFinal(station, shiftName);
+          const deficit = min - count;
+          if (deficit <= 0) continue;
+
+          // Check role constraints
+          if (role === 'mlt') {
+            const mltsHere = group.filter(a => a.station_id === sid && empRoleMapFinal.get(a.employee_id) === 'mlt').length;
+            if (mltsHere >= getMLTSlotsFinal(station)) continue;
+          }
+
+          if (deficit > bestDeficit) {
+            bestDeficit = deficit;
+            bestKey = key;
+            bestStationId = sid;
+          }
+        }
+      }
+
+      if (bestKey && bestStationId >= 0) {
+        const group = shiftDateGroupsRebuilt.get(bestKey)!;
+        const newAssignment: Assignment = {
+          employee_id: emp.id,
+          shift_id: group[0].shift_id,
+          date: group[0].date,
+          station_id: bestStationId,
+        };
+        result.push(newAssignment);
+        group.push(newAssignment);
+      }
+      // If no placement found, per-diem just doesn't work that day — no warning needed
+    }
+
+    // Step 4: Remove non-per-diem employees who still have no station
+    // They must have a station — if we truly can't place them, flag it
+    const unplacedNonPerDiem: Assignment[] = [];
+    for (let i = result.length - 1; i >= 0; i--) {
+      const a = result[i];
+      if (a.station_id !== null) continue;
+      const emp = employees.find(e => e.id === a.employee_id);
+      if (!emp) continue;
+      if (emp.role === 'admin') continue; // admins at Admin station should have station_id set
+      unplacedNonPerDiem.push(a);
+      result.splice(i, 1);
+    }
+
+    for (const a of unplacedNonPerDiem) {
+      const emp = employees.find(e => e.id === a.employee_id);
+      const shiftLabel = shifts.find(s => s.id === a.shift_id)?.name ?? 'Unknown';
+      warnings.push(`CRITICAL: ${emp?.name ?? 'Unknown'} has no station on ${a.date} (${shiftLabel}) and was removed — needs manual assignment`);
+    }
   }
 
 
@@ -2052,6 +2857,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   // ═══════════════════════════════════════════════════════════════
 
   for (const emp of employees) {
+    // Admins are excluded from staffing warnings
+    if (emp.role === 'admin') continue;
+
     for (const wk of weekNumbers) {
       const key = `${emp.id}-${wk}`;
       const hours = weekHours.get(key) ?? 0;
@@ -2094,6 +2902,12 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
   if (result.length === 0) {
     warnings.push('No assignments generated — check employee constraints and availability');
+  }
+
+  // ── Final validation summary ──
+  const criticalCount = warnings.filter(w => w.startsWith('CRITICAL:')).length;
+  if (criticalCount > 0) {
+    warnings.unshift(`⚠ ${criticalCount} critical issue(s) remain after ${25} optimization passes — these require manual fixes or additional staff`);
   }
 
   return { assignments: result, warnings: groupWarningsByShift(warnings) };
