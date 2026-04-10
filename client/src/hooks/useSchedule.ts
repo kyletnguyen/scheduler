@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSchedule, fetchWarnings, createAssignment, deleteAssignment, generateSchedule } from '../api/schedules';
+import { fetchSchedule, fetchWarnings, createAssignment, deleteAssignment, generateSchedule, checkPTOImpact } from '../api/schedules';
+import type { PTOImpact } from '../api/schedules';
 import { fetchShifts } from '../api/shifts';
 
 export function useShifts() {
@@ -41,6 +42,15 @@ export function useDeleteAssignment(month: string) {
       qc.invalidateQueries({ queryKey: ['schedule', month] });
       qc.invalidateQueries({ queryKey: ['warnings', month] });
     },
+  });
+}
+
+export function usePTOImpact(employeeId: number, dates: string[]) {
+  return useQuery<PTOImpact>({
+    queryKey: ['pto-impact', employeeId, dates],
+    queryFn: () => checkPTOImpact(employeeId, dates),
+    enabled: dates.length > 0,
+    staleTime: 30_000,
   });
 }
 

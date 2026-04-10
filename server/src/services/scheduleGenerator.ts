@@ -479,8 +479,9 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
       }
     }
 
-    // Time-off conflicts (skip Admin)
+    // Time-off conflicts (skip Admin, only full-day PTO is a coverage gap)
     for (const to of timeOff) {
+      if (to.off_type !== 'full') continue;
       const empStations = empStationMap.get(to.employee_id) ?? [];
       if (empStations.length === 0) continue;
       const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
@@ -493,6 +494,16 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
           warnings.push(`CRITICAL: ${empName} is off ${to.date} but no other ${station.name}-qualified employee is scheduled — deny time-off or reassign coverage`);
         }
       }
+    }
+  }
+
+  // Partial PTO without assignment — they're working part of the day but have no station
+  const partialTimeOff = timeOff.filter(t => t.off_type === 'custom');
+  for (const to of partialTimeOff) {
+    const hasAssignment = result.some(a => a.employee_id === to.employee_id && a.date === to.date);
+    if (!hasAssignment) {
+      const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
+      warnings.push(`${to.date} ${empName} has partial PTO but no station assigned — assign a station for the hours they're working`);
     }
   }
 
@@ -561,7 +572,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   const timeOff = db.prepare("SELECT * FROM time_off WHERE date LIKE ? || '%'").all(month) as {
     employee_id: number; date: string; off_type: string;
   }[];
-  const timeOffSet = new Set(timeOff.map(t => `${t.employee_id}-${t.date}`));
+  const timeOffSet = new Set(timeOff.filter(t => t.off_type === 'full').map(t => `${t.employee_id}-${t.date}`));
 
   const stations = db.prepare('SELECT * FROM stations WHERE is_active = 1 ORDER BY id').all() as Station[];
   const empStationRows = db.prepare(`
@@ -2629,8 +2640,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
-      // Time-off conflicts
+      // Time-off conflicts (only full-day PTO)
       for (const to of timeOff) {
+        if (to.off_type !== 'full') continue;
         const empStations = empStationMap.get(to.employee_id) ?? [];
         const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
         for (const stationId of empStations) {
@@ -2791,8 +2803,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         // Don't put on a day they're already working
         if (result.some(a => a.employee_id === emp.id && a.date === date)) continue;
 
-        // Check time off
-        if (timeOff.some(to => to.employee_id === emp.id && to.date === date)) continue;
+        // Check time off (only full-day blocks assignment)
+        if (timeOff.some(to => to.employee_id === emp.id && to.date === date && to.off_type === 'full')) continue;
 
         // Find understaffed station they're qualified for
         for (const sid of quals) {

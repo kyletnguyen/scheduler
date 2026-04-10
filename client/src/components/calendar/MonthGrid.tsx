@@ -98,11 +98,11 @@ export default function MonthGrid() {
     assignmentIndex.set(`${a.employee_id}-${a.date}`, a);
   }
 
-  // Index: employee_id -> Set of time-off dates
-  const timeOffIndex = new Map<number, Set<string>>();
+  // Index: employee_id -> date -> off_type
+  const timeOffIndex = new Map<number, Map<string, string>>();
   for (const t of timeOff) {
-    if (!timeOffIndex.has(t.employee_id)) timeOffIndex.set(t.employee_id, new Set());
-    timeOffIndex.get(t.employee_id)!.add(t.date);
+    if (!timeOffIndex.has(t.employee_id)) timeOffIndex.set(t.employee_id, new Map());
+    timeOffIndex.get(t.employee_id)!.set(t.date, t.off_type);
   }
 
   // Index: date -> list of coverage issues (parsed from warnings)
@@ -241,6 +241,31 @@ export default function MonthGrid() {
           lx += pdf.getTextWidth(item.label) + 32;
         }
 
+        // Shift badges (for cross-shift days)
+        lx += 6;
+        pdf.setTextColor(100, 100, 100);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text('Shifts:', lx, ly);
+        lx += pdf.getTextWidth('Shifts:') + 6;
+
+        const shiftLegend: { label: string; rgb: [number, number, number]; textRgb: [number, number, number]; name: string }[] = [
+          { label: 'AM', rgb: SHIFT_ICONS.AM.rgb, textRgb: [120, 80, 0], name: 'AM' },
+          { label: 'PM', rgb: SHIFT_ICONS.PM.rgb, textRgb: [255, 255, 255], name: 'PM' },
+          { label: 'NS', rgb: SHIFT_ICONS.Night.rgb, textRgb: [255, 255, 255], name: 'Night' },
+        ];
+        for (const item of shiftLegend) {
+          const [r, g, b] = item.rgb;
+          pdf.setFillColor(r, g, b);
+          pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+          pdf.setTextColor(item.textRgb[0], item.textRgb[1], item.textRgb[2]);
+          pdf.setFont('helvetica', 'bold');
+          pdf.text(item.label, lx + 9, ly - 1, { align: 'center' });
+          pdf.setTextColor(80, 80, 80);
+          pdf.setFont('helvetica', 'normal');
+          pdf.text(item.name, lx + 22, ly);
+          lx += pdf.getTextWidth(item.name) + 32;
+        }
+
         // PTO + Off on the same row
         pdf.setFillColor(254, 226, 226);
         pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
@@ -290,26 +315,39 @@ export default function MonthGrid() {
 
         drawLegend();
 
-        // Build table data for this shift group
-        const cellData: Map<string, { shiftName: string; stationName: string | null }> = new Map();
+        // Build table data for this shift group + cross-shift guests
+        const cellData: Map<string, { shiftName: string; stationName: string | null; isCrossShift: boolean }> = new Map();
         const body: string[][] = [];
+        const guestRowIndices = new Set<number>();
 
         group.emps.forEach((emp, ri) => {
           const cells = [emp.name];
           for (let ci = 0; ci < days.length; ci++) {
             const dateStr = format(days[ci], 'yyyy-MM-dd');
             const assignment = assignmentIndex.get(`${emp.id}-${dateStr}`);
-            const isOff = timeOffIndex.get(emp.id)?.has(dateStr);
+            const offType = timeOffIndex.get(emp.id)?.get(dateStr);
 
-            if (isOff) {
+            if (offType === 'full') {
               cells.push('PTO');
+            } else if (offType === 'custom' && assignment) {
+              const stationDisplay = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
+              cells.push(stationDisplay ? `${stationDisplay.abbr}/2` : '½');
+            } else if (offType === 'custom') {
+              cells.push('½');
             } else if (assignment) {
+              const isCrossShift = emp.default_shift !== 'floater' && assignment.shift_name.toLowerCase() !== emp.default_shift;
               const icon = SHIFT_ICONS[assignment.shift_name];
               const stationDisplay = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
-              cells.push(stationDisplay ? stationDisplay.abbr : (icon ? icon.label : assignment.shift_name.charAt(0)));
+              // Cross-shift: show shift badge (AM/PM/NS) instead of station — matches web view
+              if (isCrossShift && icon) {
+                cells.push(icon.label);
+              } else {
+                cells.push(stationDisplay ? stationDisplay.abbr : (icon ? icon.label : assignment.shift_name.charAt(0)));
+              }
               cellData.set(`${ri}-${ci}`, {
                 shiftName: assignment.shift_name,
                 stationName: assignment.station_name ?? null,
+                isCrossShift,
               });
             } else {
               cells.push('—');
@@ -317,6 +355,33 @@ export default function MonthGrid() {
           }
           body.push(cells);
         });
+
+        // Add cross-shift guests (e.g., John PM appearing on AM page)
+        const guests = crossShiftByGroup.get(group.key) ?? [];
+        for (const { emp: guestEmp, assignments: guestAssignments } of guests) {
+          const ri = body.length;
+          guestRowIndices.add(ri);
+          const guestIndex = new Map<string, ScheduleAssignment>();
+          for (const a of guestAssignments) guestIndex.set(a.date, a);
+
+          const cells = [`${guestEmp.name} (${guestEmp.default_shift.toUpperCase()})`];
+          for (let ci = 0; ci < days.length; ci++) {
+            const dateStr = format(days[ci], 'yyyy-MM-dd');
+            const ga = guestIndex.get(dateStr);
+            if (ga) {
+              const stationDisplay = ga.station_name ? getStationDisplay(ga.station_name) : null;
+              cells.push(stationDisplay ? stationDisplay.abbr : (SHIFT_ICONS[ga.shift_name]?.label ?? ga.shift_name.charAt(0)));
+              cellData.set(`${ri}-${ci}`, {
+                shiftName: ga.shift_name,
+                stationName: ga.station_name ?? null,
+                isCrossShift: false,
+              });
+            } else {
+              cells.push('—');
+            }
+          }
+          body.push(cells);
+        }
 
         // Calculate sizing to fill page width evenly
         const margin = 16;
@@ -432,10 +497,24 @@ export default function MonthGrid() {
             if (text === 'PTO') {
               bgColor = [254, 202, 202];
               textColor = [185, 28, 28];
+            } else if (text === '½' || text.endsWith('/2')) {
+              // Partial PTO — use station color with orange tint if station assigned
+              const stationPart = text.endsWith('/2') ? text.slice(0, -2) : null;
+              const stationMatch = stationPart ? Object.keys(STATION_STYLES).find(s => getStationDisplay(s).abbr === stationPart) : null;
+              if (stationMatch) {
+                bgColor = [...getStationDisplay(stationMatch).rgb] as [number, number, number];
+              } else {
+                bgColor = [255, 237, 213];
+              }
+              textColor = [255, 255, 255];
             } else {
               const cd = cellData.get(`${ri}-${dayIdx}`);
               if (cd) {
-                if (cd.stationName) {
+                if (cd.isCrossShift) {
+                  // Cross-shift: always use shift color (matches web view)
+                  const icon = SHIFT_ICONS[cd.shiftName];
+                  if (icon) bgColor = [...icon.rgb] as [number, number, number];
+                } else if (cd.stationName) {
                   bgColor = [...getStationDisplay(cd.stationName).rgb] as [number, number, number];
                 } else {
                   const icon = SHIFT_ICONS[cd.shiftName];
@@ -805,7 +884,8 @@ export default function MonthGrid() {
                     const dateStr = format(day, 'yyyy-MM-dd');
                     const key = `${emp.id}-${dateStr}`;
                     const assignment = assignmentIndex.get(key);
-                    const isOff = empTimeOff?.has(dateStr);
+                    const offType = empTimeOff?.get(dateStr);
+                    const isOff = !!offType;
                     const dayNum = getDay(day);
                     const isWknd = dayNum === 0 || dayNum === 6;
                     const isSat = dayNum === 6;
@@ -814,9 +894,23 @@ export default function MonthGrid() {
                     let cellContent: React.ReactNode;
                     let cellBg = '';
 
-                    if (isOff) {
+                    if (offType === 'full') {
                       cellContent = <span className="text-xs font-bold text-red-600">P</span>;
                       cellBg = 'bg-red-50';
+                    } else if (offType === 'custom' && assignment) {
+                      // Partial PTO + assigned: show station/2 (e.g. HM/2)
+                      const station = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
+                      const label = station ? `${station.abbr}/2` : '½';
+                      cellContent = (
+                        <span className={`px-1 h-5 rounded text-[9px] font-bold flex items-center justify-center ${station ? `${station.bg} text-white` : 'bg-orange-400 text-white'} shadow-sm ring-1 ring-inset ring-orange-300/60`}>
+                          {label}
+                        </span>
+                      );
+                      cellBg = 'bg-orange-50';
+                    } else if (offType === 'custom') {
+                      // Partial PTO, no assignment yet
+                      cellContent = <span className="text-[10px] font-bold text-orange-500">½</span>;
+                      cellBg = 'bg-orange-50';
                     } else if (assignment) {
                       const isCrossShift = emp.default_shift !== 'floater' && assignment.shift_name.toLowerCase() !== emp.default_shift;
                       const icon = SHIFT_ICONS[assignment.shift_name];
@@ -853,12 +947,13 @@ export default function MonthGrid() {
                     return (
                       <td
                         key={dateStr}
-                        onClick={() => !isOff && handleCellClick(emp, dateStr)}
+                        onClick={() => offType !== 'full' && handleCellClick(emp, dateStr)}
                         className={`text-center py-1.5 px-0.5 cursor-pointer transition-colors hover:bg-blue-50 ${cellBg} ${
                           isToday ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/30' : ''
                         } ${isSat ? 'border-l-2 border-l-orange-300' : ''} ${isWknd && !isOff ? 'bg-amber-50/60' : ''}`}
                         title={
-                          isOff ? `${emp.name} - PTO` :
+                          offType === 'full' ? `${emp.name} - PTO (full day)` :
+                          offType === 'custom' ? `${emp.name} - Partial PTO${assignment ? ` + ${assignment.shift_name}${assignment.station_name ? ` @ ${assignment.station_name}` : ''}` : ''}` :
                           assignment ? `${emp.name} - ${assignment.shift_name}${assignment.station_name ? ` @ ${assignment.station_name}` : ''} (click to remove)` :
                           `Assign ${emp.name} on ${dateStr}`
                         }
@@ -1005,6 +1100,7 @@ export default function MonthGrid() {
                       <th key={i} className="text-center px-2 py-2.5 font-bold text-gray-700 whitespace-nowrap">{wk.label}</th>
                     ))}
                     <th className="text-center px-3 py-2.5 font-bold text-gray-700">Total</th>
+                    <th className="text-center px-3 py-2.5 font-bold text-red-600">PTO</th>
                     <th className="text-center px-3 py-2.5 font-bold text-gray-700">Wknd</th>
                     <th className="text-left px-3 py-2.5 font-bold text-gray-700">Stations</th>
                   </tr>
@@ -1020,12 +1116,9 @@ export default function MonthGrid() {
                       return dow === 0 || dow === 6;
                     }).length;
                     const totalHours = totalDays * 8;
+                    const empTimeOffDays = days.filter(d => timeOffIndex.get(emp.id)?.has(format(d, 'yyyy-MM-dd'))).length;
                     const stationCounts = empStationCounts.get(emp.id) ?? new Map<string, number>();
-                    const stationOrder = ['Hematology/UA', 'Chemistry', 'Microbiology', 'Blood Bank', 'Admin', 'Unassigned'];
-                    const sortedStations = [...stationCounts.entries()].sort(([a], [b]) => {
-                      const ai = stationOrder.indexOf(a); const bi = stationOrder.indexOf(b);
-                      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-                    });
+                    const sortedStations = [...stationCounts.entries()].sort(([, a], [, b]) => b - a);
 
                     // Shift group separator
                     const showSep = emp.default_shift !== lastShift;
@@ -1037,7 +1130,7 @@ export default function MonthGrid() {
                       <React.Fragment key={emp.id}>
                         {showSep && (
                           <tr className="bg-gray-200">
-                            <td colSpan={weeks.length + 5} className="px-4 py-1.5 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-y border-gray-300">
+                            <td colSpan={weeks.length + 6} className="px-4 py-1.5 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-y border-gray-300">
                               {groupLabel} Shift
                             </td>
                           </tr>
@@ -1051,8 +1144,8 @@ export default function MonthGrid() {
                                 emp.role === 'mlt' ? 'bg-violet-100 text-violet-700' :
                                 'bg-sky-100 text-sky-700'
                               }`}>{emp.role.toUpperCase()}</span>
-                              {emp.employment_type === 'per-diem' && <span className="text-[9px] text-gray-400">PD</span>}
-                              {emp.employment_type === 'part-time' && <span className="text-[9px] text-gray-400">PT</span>}
+                              {emp.employment_type === 'per-diem' && <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-orange-100 text-orange-600">Per-Diem</span>}
+                              {emp.employment_type === 'part-time' && <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-pink-100 text-pink-600">Part-Time</span>}
                             </div>
                           </td>
                           <td className="text-center px-3 py-2 text-gray-400 font-medium">{target}h</td>
@@ -1075,6 +1168,9 @@ export default function MonthGrid() {
                           })}
                           <td className="text-center px-3 py-2">
                             <span className="font-bold text-gray-800 bg-gray-100 px-2 py-0.5 rounded">{totalHours}h</span>
+                          </td>
+                          <td className="text-center px-3 py-2">
+                            <span className={`font-medium ${empTimeOffDays > 0 ? 'text-red-600' : 'text-gray-400'}`}>{empTimeOffDays}</span>
                           </td>
                           <td className="text-center px-3 py-2">
                             <span className={`font-medium ${wkndDays > 0 ? 'text-orange-600' : 'text-gray-400'}`}>{wkndDays}</span>

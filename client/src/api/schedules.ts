@@ -38,6 +38,23 @@ export async function deleteAssignment(id: number): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete assignment');
 }
 
+export interface PTOImpact {
+  employee_name: string;
+  dates_checked: number;
+  issues: { date: string; severity: 'critical' | 'warning'; message: string }[];
+  has_critical: boolean;
+}
+
+export async function checkPTOImpact(employee_id: number, dates: string[]): Promise<PTOImpact> {
+  const res = await fetch(`${BASE}/pto-impact`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ employee_id, dates }),
+  });
+  if (!res.ok) throw new Error('Failed to check PTO impact');
+  return res.json();
+}
+
 export async function generateSchedule(month: string, clear: boolean): Promise<{ generated: number; inserted: number; skipped: number; warnings: string[] }> {
   const res = await fetch(`${BASE}/generate`, {
     method: 'POST',

@@ -87,17 +87,11 @@ export default function StationList() {
                 </div>
               </th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">Allows MLT</th>
-              <th className="text-center px-3 py-3 font-medium text-gray-500">
-                <div className="leading-tight">
-                  <div className="text-[10px]">Total</div>
-                  <div>AM</div>
-                </div>
-              </th>
               <th className="text-right px-4 py-3 font-medium text-gray-600">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {stations.map((station) => (
+            {stations.filter(s => s.name !== 'Admin').map((station) => (
               <tr key={station.id} className="border-b last:border-0 hover:bg-gray-50">
                 <td className="px-4 py-3">
                   <div>
@@ -152,11 +146,6 @@ export default function StationList() {
                     {station.require_cls ? 'Yes — MLTs allowed' : 'No — CLS only'}
                   </button>
                 </td>
-                <td className="px-3 py-3 text-center">
-                  <span className="text-xs text-gray-500">
-                    {station.min_staff_am + (station.require_cls ? 1 : 0)}
-                  </span>
-                </td>
                 <td className="px-4 py-3 text-right">
                   <button
                     onClick={() => handleDelete(station.id, station.name)}
@@ -169,7 +158,7 @@ export default function StationList() {
             ))}
             {stations.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
                   No stations yet. Add one to get started.
                 </td>
               </tr>

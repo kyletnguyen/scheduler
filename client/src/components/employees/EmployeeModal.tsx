@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
-import { useUpdateEmployee, useSaveConstraints } from '../../hooks/useEmployees';
+import { useUpdateEmployee, useSaveConstraints, useEmployees } from '../../hooks/useEmployees';
 import { useStations, useSaveEmployeeStations } from '../../hooks/useStations';
 import { useTimeOff, useCreateTimeOff, useDeleteTimeOff, useClearTimeOff } from '../../hooks/useTimeOff';
+import { usePTOImpact } from '../../hooks/useSchedule';
 import type { Employee, DefaultShift } from '../../types';
 import toast from 'react-hot-toast';
 
@@ -26,7 +27,7 @@ export default function EmployeeModal({ employee, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl h-[70vh] flex flex-col">
+      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-5 pb-3">
           <h2 className="text-lg font-bold text-gray-900">{employee.name}</h2>
@@ -64,6 +65,19 @@ export default function EmployeeModal({ employee, onClose }: Props) {
 
 // ─── Details Tab ───
 
+const SHIFT_OPTIONS: { value: DefaultShift; label: string; desc: string; color: string; activeColor: string }[] = [
+  { value: 'am', label: 'AM', desc: 'Day shift', color: 'border-gray-200 bg-white hover:bg-gray-50', activeColor: 'border-2 border-amber-300 bg-amber-50 text-amber-800 shadow-sm' },
+  { value: 'pm', label: 'PM', desc: 'Evening shift', color: 'border-gray-200 bg-white hover:bg-gray-50', activeColor: 'border-2 border-indigo-300 bg-indigo-50 text-indigo-800 shadow-sm' },
+  { value: 'night', label: 'Night', desc: 'Overnight', color: 'border-gray-200 bg-white hover:bg-gray-50', activeColor: 'border-2 border-gray-400 bg-gray-100 text-gray-800 shadow-sm' },
+  { value: 'floater', label: 'Floater', desc: 'Flexible', color: 'border-gray-200 bg-white hover:bg-gray-50', activeColor: 'border-2 border-teal-300 bg-teal-50 text-teal-800 shadow-sm' },
+];
+
+const ROLE_OPTIONS: { value: Employee['role']; label: string; desc: string }[] = [
+  { value: 'cls', label: 'CLS', desc: 'Clinical Lab Scientist' },
+  { value: 'mlt', label: 'MLT', desc: 'Medical Lab Technician' },
+  { value: 'admin', label: 'Admin', desc: 'Administrative' },
+];
+
 function DetailsTab({ employee, onClose }: { employee: Employee; onClose: () => void }) {
   const updateMutation = useUpdateEmployee();
   const [name, setName] = useState(employee.name);
@@ -84,57 +98,83 @@ function DetailsTab({ employee, onClose }: { employee: Employee; onClose: () => 
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      {/* Name */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+        <label className="block text-sm font-semibold text-gray-700 mb-1.5">Name</label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
         />
       </div>
+
+      {/* Role */}
+      <div>
+        <label className="block text-sm font-semibold text-gray-700 mb-1.5">Role</label>
+        <div className="grid grid-cols-3 gap-2">
+          {ROLE_OPTIONS.map((r) => (
+            <button
+              key={r.value}
+              type="button"
+              onClick={() => setRole(r.value)}
+              className={`px-3 py-2.5 rounded-lg border text-center transition-all ${
+                role === r.value
+                  ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200'
+                  : 'border-gray-200 bg-white hover:bg-gray-50'
+              }`}
+            >
+              <div className={`text-sm font-bold ${role === r.value ? 'text-blue-700' : 'text-gray-700'}`}>{r.label}</div>
+              <div className="text-[10px] text-gray-400 mt-0.5">{r.desc}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Employment Type + Hours */}
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Employment Type</label>
+          <label className="block text-sm font-semibold text-gray-700 mb-1.5">Employment</label>
           <select value={type} onChange={(e) => setType(e.target.value as Employee['employment_type'])}
-            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white">
             <option value="full-time">Full-Time</option>
             <option value="part-time">Part-Time</option>
             <option value="per-diem">Per Diem</option>
           </select>
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Target Hours/Week</label>
+          <label className="block text-sm font-semibold text-gray-700 mb-1.5">Target Hrs/Week</label>
           <input type="number" value={hours} onChange={(e) => setHours(Number(e.target.value))}
             min={0} max={80} step={0.5}
-            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Default Shift</label>
-          <select value={shift} onChange={(e) => setShift(e.target.value as DefaultShift)}
-            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="am">AM</option>
-            <option value="pm">PM</option>
-            <option value="night">Night</option>
-            <option value="floater">Floater</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-          <select value={role} onChange={(e) => setRole(e.target.value as Employee['role'])}
-            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="cls">CLS</option>
-            <option value="mlt">MLT</option>
-            <option value="admin">Admin</option>
-          </select>
+
+      {/* Default Shift */}
+      <div>
+        <label className="block text-sm font-semibold text-gray-700 mb-1.5">Default Shift</label>
+        <div className="grid grid-cols-4 gap-2">
+          {SHIFT_OPTIONS.map((s) => (
+            <button
+              key={s.value}
+              type="button"
+              onClick={() => setShift(s.value)}
+              className={`px-2 py-2.5 rounded-lg border text-center transition-all ${
+                shift === s.value ? s.activeColor : s.color
+              }`}
+            >
+              <div className={`text-sm font-bold ${shift === s.value ? '' : 'text-gray-600'}`}>{s.label}</div>
+              <div className="text-[10px] text-gray-400 mt-0.5">{s.desc}</div>
+            </button>
+          ))}
         </div>
       </div>
+
+      {/* Save */}
       <div className="pt-2">
-        <button onClick={handleSave} disabled={updateMutation.isPending}
-          className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+        <button onClick={handleSave} disabled={updateMutation.isPending || !name.trim()}
+          className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">
           {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
         </button>
       </div>
@@ -157,9 +197,25 @@ function TimeOffTab({ employee }: { employee: Employee }) {
   const month = format(currentDate, 'yyyy-MM');
 
   const { data: timeOff } = useTimeOff({ employee_id: employee.id, month });
+  const { data: allMonthTimeOff } = useTimeOff({ month }); // everyone's time off this month
+  const { data: allEmployees } = useEmployees();
   const createMutation = useCreateTimeOff();
   const deleteMutation = useDeleteTimeOff();
   const clearMutation = useClearTimeOff();
+
+  // Build "who else is off" index: date -> list of other employee names
+  const othersOffByDate = new Map<string, string[]>();
+  if (allMonthTimeOff && allEmployees) {
+    const empNameMap = new Map(allEmployees.map(e => [e.id, e.name]));
+    for (const entry of allMonthTimeOff) {
+      if (entry.employee_id === employee.id) continue;
+      if (entry.off_type !== 'full') continue;
+      const names = othersOffByDate.get(entry.date) ?? [];
+      const name = empNameMap.get(entry.employee_id);
+      if (name) names.push(name);
+      othersOffByDate.set(entry.date, names);
+    }
+  }
 
   // Drag-to-select range state
   const [dragStart, setDragStart] = useState<string | null>(null);
@@ -171,6 +227,13 @@ function TimeOffTab({ employee }: { employee: Employee }) {
   const end = endOfMonth(currentDate);
   const days = eachDayOfInterval({ start, end });
   const startPad = getDay(start);
+
+  const fullDayCount = timeOff?.filter(t => t.off_type === 'full').length ?? 0;
+  const customCount = timeOff?.filter(t => t.off_type === 'custom').length ?? 0;
+
+  // PTO impact check — only for full-day PTO entries
+  const fullDayDates = (timeOff ?? []).filter(t => t.off_type === 'full').map(t => t.date);
+  const { data: ptoImpact, isLoading: impactLoading } = usePTOImpact(employee.id, fullDayDates);
 
   // Get sorted range between two date strings
   const getRange = (a: string, b: string): string[] => {
@@ -227,35 +290,105 @@ function TimeOffTab({ employee }: { employee: Employee }) {
   };
 
   return (
-    <div className="flex gap-6">
-      {/* Controls */}
-      <div className="flex flex-col gap-3 min-w-[160px]">
-        <div className="flex gap-1.5">
-          <button onClick={() => setOffType('full')}
-            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${offType === 'full' ? 'bg-gray-800 text-white' : 'bg-white border text-gray-600 hover:bg-gray-100'}`}>
-            Full Day
-          </button>
-          <button onClick={() => setOffType('custom')}
-            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${offType === 'custom' ? 'bg-gray-800 text-white' : 'bg-white border text-gray-600 hover:bg-gray-100'}`}>
-            Custom
-          </button>
-        </div>
-        {offType === 'custom' && (
-          <div className="flex items-center gap-2 bg-gray-50 border rounded-lg p-2">
-            <input type="time" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
-              className="border rounded px-2 py-1 text-sm flex-1" />
-            <span className="text-xs text-gray-400">to</span>
-            <input type="time" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
-              className="border rounded px-2 py-1 text-sm flex-1" />
+    <div className="space-y-4">
+      {/* PTO Impact Warning */}
+      {ptoImpact && ptoImpact.issues.length > 0 && (
+        <div className={`rounded-lg border p-3 ${
+          ptoImpact.has_critical
+            ? 'bg-red-50 border-red-200'
+            : 'bg-amber-50 border-amber-200'
+        }`}>
+          <div className="flex items-start gap-2">
+            <span className={`text-lg leading-none mt-0.5 ${ptoImpact.has_critical ? 'text-red-500' : 'text-amber-500'}`}>
+              {ptoImpact.has_critical ? '!!' : '!'}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className={`text-xs font-bold ${ptoImpact.has_critical ? 'text-red-800' : 'text-amber-800'}`}>
+                {ptoImpact.has_critical ? 'Critical Coverage Gaps' : 'Scheduling Warnings'}
+              </div>
+              <p className={`text-[11px] mt-0.5 ${ptoImpact.has_critical ? 'text-red-700' : 'text-amber-700'}`}>
+                Approving this PTO will cause {ptoImpact.issues.length} issue{ptoImpact.issues.length !== 1 ? 's' : ''} with the current schedule:
+              </p>
+              <div className="mt-2 space-y-1 max-h-[120px] overflow-y-auto">
+                {ptoImpact.issues.map((issue, i) => (
+                  <div key={i} className="flex items-start gap-1.5 text-[11px]">
+                    <span className={`w-1.5 h-1.5 rounded-full mt-1 shrink-0 ${
+                      issue.severity === 'critical' ? 'bg-red-500' : 'bg-amber-500'
+                    }`} />
+                    <span className={issue.severity === 'critical' ? 'text-red-700' : 'text-amber-700'}>
+                      <span className="font-semibold">{format(new Date(issue.date + 'T00:00:00'), 'EEE M/d')}</span>
+                      {' — '}
+                      {issue.message}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-        )}
-        <p className="text-[10px] text-gray-400">Click a date or drag across dates to select a range. Click a marked date to remove it.</p>
+        </div>
+      )}
+      {impactLoading && fullDayDates.length > 0 && (
+        <div className="text-[11px] text-gray-400 flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />
+          Checking schedule impact...
+        </div>
+      )}
+
+    <div className="flex gap-6">
+      {/* Left: mode picker + summary */}
+      <div className="flex flex-col gap-3 w-[320px] shrink-0">
+        {/* Mode toggle card */}
+        <div className="bg-gray-50 border border-gray-200 rounded-xl p-3">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block mb-2">Type</span>
+          <div className="flex gap-1.5">
+            <button onClick={() => setOffType('full')}
+              className={`flex-1 text-xs px-3 py-2 rounded-lg font-medium transition-all ${
+                offType === 'full'
+                  ? 'bg-red-500 text-white shadow-sm'
+                  : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-50'
+              }`}>
+              Full Day
+            </button>
+            <button onClick={() => setOffType('custom')}
+              className={`flex-1 text-xs px-3 py-2 rounded-lg font-medium transition-all ${
+                offType === 'custom'
+                  ? 'bg-orange-500 text-white shadow-sm'
+                  : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-50'
+              }`}>
+              Partial Day
+            </button>
+          </div>
+
+          {/* Custom hours */}
+          {offType === 'custom' && (
+            <div className="bg-orange-50 border border-orange-200 rounded-lg p-2.5 mt-2.5">
+              <span className="text-[10px] font-semibold text-orange-600 block mb-1.5">Hours off</span>
+              <div className="flex items-center gap-1.5">
+                <input type="time" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
+                  className="border border-orange-200 rounded px-2 py-1.5 text-xs flex-1 bg-white focus:outline-none focus:ring-1 focus:ring-orange-400" />
+                <span className="text-[10px] text-orange-400 font-medium">to</span>
+                <input type="time" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
+                  className="border border-orange-200 rounded px-2 py-1.5 text-xs flex-1 bg-white focus:outline-none focus:ring-1 focus:ring-orange-400" />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <p className="text-[10px] text-gray-400 leading-snug">
+          {offType === 'full'
+            ? 'Click or drag across dates to mark full-day PTO. Click a marked date to remove it.'
+            : `Click or drag dates to mark off ${customStart}–${customEnd}. Click a marked date to remove.`
+          }
+        </p>
 
         {/* Summary */}
         {timeOff && timeOff.length > 0 && (
-          <div className="mt-2">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-gray-500">Marked off:</span>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs font-semibold text-gray-700">
+                Scheduled Off
+                <span className="text-gray-400 font-normal ml-1">({timeOff.length})</span>
+              </span>
               <button
                 onClick={() => {
                   if (!confirm(`Clear all ${timeOff.length} entries for ${format(currentDate, 'MMM yyyy')}?`)) return;
@@ -269,14 +402,37 @@ function TimeOffTab({ employee }: { employee: Employee }) {
                 Clear All
               </button>
             </div>
-            <div className="max-h-[180px] overflow-y-auto space-y-0.5">
+
+            {/* Counts */}
+            <div className="flex gap-3 mb-2 text-[10px]">
+              {fullDayCount > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-red-500" />
+                  <span className="text-gray-600">{fullDayCount} full</span>
+                </span>
+              )}
+              {customCount > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-orange-500" />
+                  <span className="text-gray-600">{customCount} partial</span>
+                </span>
+              )}
+            </div>
+
+            <div className="max-h-[160px] overflow-y-auto space-y-0.5">
               {timeOff.map((t) => (
-                <div key={t.id} className="flex items-center gap-1.5 text-xs text-gray-600">
+                <div key={t.id} className="flex items-center gap-1.5 text-xs text-gray-600 group py-0.5">
                   <span className={`w-2 h-2 rounded-full shrink-0 ${OFF_TYPE_COLORS[t.off_type]?.split(' ')[0] ?? 'bg-red-500'}`} />
-                  <span>{format(new Date(t.date + 'T00:00:00'), 'MMM d')}</span>
+                  <span className="font-medium">{format(new Date(t.date + 'T00:00:00'), 'EEE, MMM d')}</span>
                   <span className="text-gray-400 text-[10px]">
-                    {t.off_type === 'custom' && t.start_time ? `${t.start_time}-${t.end_time}` : 'All day'}
+                    {t.off_type === 'custom' && t.start_time ? `${t.start_time}–${t.end_time}` : 'All day'}
                   </span>
+                  <button
+                    onClick={() => deleteMutation.mutate(t.id, { onError: (err) => toast.error(err.message) })}
+                    className="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity ml-auto"
+                  >
+                    &times;
+                  </button>
                 </div>
               ))}
             </div>
@@ -285,17 +441,17 @@ function TimeOffTab({ employee }: { employee: Employee }) {
       </div>
 
       {/* Calendar */}
-      <div className="flex-1 max-w-[340px] select-none" onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
+      <div className="flex-1 max-w-[360px] select-none" onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
         <div className="flex items-center justify-between mb-2">
           <button onClick={() => setCurrentDate(subMonths(currentDate, 1))}
-            className="px-2 py-1 text-sm hover:bg-gray-100 rounded">&larr;</button>
-          <span className="text-sm font-semibold text-gray-700">{format(currentDate, 'MMMM yyyy')}</span>
+            className="px-2.5 py-1 text-sm hover:bg-gray-100 rounded-lg text-gray-500">&larr;</button>
+          <span className="text-sm font-bold text-gray-800">{format(currentDate, 'MMMM yyyy')}</span>
           <button onClick={() => setCurrentDate(addMonths(currentDate, 1))}
-            className="px-2 py-1 text-sm hover:bg-gray-100 rounded">&rarr;</button>
+            className="px-2.5 py-1 text-sm hover:bg-gray-100 rounded-lg text-gray-500">&rarr;</button>
         </div>
         <div className="grid grid-cols-7 gap-1 text-center">
           {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((d, i) => (
-            <div key={i} className="text-[10px] font-semibold text-gray-400 py-1">{d}</div>
+            <div key={i} className="text-[10px] font-bold text-gray-400 py-1">{d}</div>
           ))}
           {Array.from({ length: startPad }).map((_, i) => <div key={`pad-${i}`} />)}
           {days.map((day) => {
@@ -303,27 +459,77 @@ function TimeOffTab({ employee }: { employee: Employee }) {
             const entry = timeOffMap.get(dateStr);
             const isWknd = getDay(day) === 0 || getDay(day) === 6;
             const inRange = isInDragRange(dateStr);
+            const othersOff = othersOffByDate.get(dateStr) ?? [];
+            const othersTooltip = othersOff.length > 0 ? `\nAlso off: ${othersOff.join(', ')}` : '';
             return (
               <div
                 key={dateStr}
                 onMouseDown={(e) => { e.preventDefault(); handleMouseDown(dateStr); }}
                 onMouseEnter={() => handleMouseEnter(dateStr)}
-                className={`py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                title={entry
+                  ? `${entry.off_type === 'custom' && entry.start_time ? `Off ${entry.start_time}–${entry.end_time}` : 'Full day off'} — click to remove${othersTooltip}`
+                  : othersOff.length > 0 ? `Also off: ${othersOff.join(', ')}` : undefined
+                }
+                className={`py-2 rounded-lg text-xs font-medium transition-all cursor-pointer relative ${
                   entry
-                    ? `${OFF_TYPE_COLORS[entry.off_type] ?? OFF_TYPE_COLORS.full} hover:opacity-80`
+                    ? `${OFF_TYPE_COLORS[entry.off_type] ?? OFF_TYPE_COLORS.full} hover:opacity-70 shadow-sm`
                     : inRange
-                      ? 'bg-red-200 text-red-800 ring-1 ring-red-300'
+                      ? offType === 'custom'
+                        ? 'bg-orange-200 text-orange-800 ring-1 ring-orange-300'
+                        : 'bg-red-200 text-red-800 ring-1 ring-red-300'
                       : isWknd
-                        ? 'bg-amber-50 text-gray-700 hover:bg-amber-100'
+                        ? 'bg-amber-50 text-gray-600 hover:bg-amber-100'
                         : 'hover:bg-gray-100 text-gray-600'
                 }`}
               >
                 {format(day, 'd')}
+                {othersOff.length > 0 && (
+                  <span className={`absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full text-[7px] font-bold flex items-center justify-center ${
+                    entry ? 'bg-white text-red-600' : 'bg-amber-400 text-white'
+                  }`}>
+                    {othersOff.length}
+                  </span>
+                )}
               </div>
             );
           })}
         </div>
       </div>
+    </div>
+
+    {/* Others off overlap — show when this employee has PTO dates that overlap with others */}
+    {(() => {
+      if (!timeOff || timeOff.length === 0) return null;
+      const myDates = timeOff.filter(t => t.off_type === 'full').map(t => t.date);
+      const overlaps = new Map<string, string[]>(); // person -> dates they overlap
+      for (const date of myDates) {
+        const others = othersOffByDate.get(date) ?? [];
+        for (const name of others) {
+          if (!overlaps.has(name)) overlaps.set(name, []);
+          overlaps.get(name)!.push(date);
+        }
+      }
+      if (overlaps.size === 0) return null;
+      return (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mt-1">
+          <div className="text-xs font-bold text-amber-800 mb-1.5">Others off on overlapping dates</div>
+          <div className="space-y-1">
+            {[...overlaps.entries()].sort(([,a],[,b]) => b.length - a.length).map(([name, dates]) => (
+              <div key={name} className="flex items-center gap-2 text-[11px]">
+                <span className="font-semibold text-amber-700 min-w-[80px]">{name}</span>
+                <div className="flex flex-wrap gap-1">
+                  {dates.map(d => (
+                    <span key={d} className="bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded text-[10px]">
+                      {format(new Date(d + 'T00:00:00'), 'M/d')}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    })()}
     </div>
   );
 }

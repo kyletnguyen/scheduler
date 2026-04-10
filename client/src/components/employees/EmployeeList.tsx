@@ -135,13 +135,6 @@ export default function EmployeeList() {
         </button>
       </div>
 
-      {showAddForm && (
-        <EmployeeForm
-          onSubmit={handleCreate}
-          onCancel={() => setShowAddForm(false)}
-        />
-      )}
-
       {/* Search & Filters */}
       <div className="mb-3 space-y-2">
         <input
@@ -378,6 +371,13 @@ export default function EmployeeList() {
         <EmployeeModal
           employee={modalEmployee}
           onClose={() => setModalEmployee(null)}
+        />
+      )}
+
+      {showAddForm && (
+        <EmployeeForm
+          onSubmit={handleCreate}
+          onCancel={() => setShowAddForm(false)}
         />
       )}
     </div>
