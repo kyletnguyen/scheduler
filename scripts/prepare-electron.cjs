@@ -44,21 +44,44 @@ const depsToInclude = ['better-sqlite3', 'bindings', 'file-uri-to-path'];
 const nodeModulesOut = path.join(OUT, 'node_modules');
 fs.mkdirSync(nodeModulesOut, { recursive: true });
 
-for (const dep of depsToInclude) {
-  // Resolve through pnpm symlinks
-  const serverDir = path.join(ROOT, 'server');
-  let pkgDir;
-  try {
-    const resolved = require.resolve(dep, { paths: [serverDir] });
-    pkgDir = path.dirname(resolved);
-    while (pkgDir !== path.parse(pkgDir).root) {
-      if (fs.existsSync(path.join(pkgDir, 'package.json'))) {
-        const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-        if (pkg.name === dep) break;
+// Build search paths: server dir, root node_modules, and pnpm virtual store
+const searchPaths = [
+  path.join(ROOT, 'server'),
+  path.join(ROOT, 'node_modules'),
+  // Also search inside better-sqlite3's dependencies (pnpm hoists differently)
+  path.join(ROOT, 'node_modules', '.pnpm', 'node_modules'),
+];
+
+function findPackageDir(dep) {
+  // Try require.resolve from multiple paths
+  for (const searchPath of searchPaths) {
+    try {
+      const resolved = require.resolve(dep, { paths: [searchPath] });
+      let pkgDir = path.dirname(resolved);
+      while (pkgDir !== path.parse(pkgDir).root) {
+        if (fs.existsSync(path.join(pkgDir, 'package.json'))) {
+          const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+          if (pkg.name === dep) return pkgDir;
+        }
+        pkgDir = path.dirname(pkgDir);
       }
-      pkgDir = path.dirname(pkgDir);
-    }
-  } catch {
+    } catch {}
+  }
+  // Fallback: search node_modules directories directly
+  const candidates = [
+    path.join(ROOT, 'node_modules', dep),
+    path.join(ROOT, 'node_modules', '.pnpm', 'node_modules', dep),
+  ];
+  for (const c of candidates) {
+    const realPath = fs.existsSync(c) ? fs.realpathSync(c) : null;
+    if (realPath && fs.existsSync(path.join(realPath, 'package.json'))) return realPath;
+  }
+  return null;
+}
+
+for (const dep of depsToInclude) {
+  const pkgDir = findPackageDir(dep);
+  if (!pkgDir) {
     console.log(`  Warning: could not resolve ${dep}, skipping`);
     continue;
   }
