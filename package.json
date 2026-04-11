@@ -1,7 +1,7 @@
 {
   "name": "shift-scheduler",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Lab Shift Scheduler",
   "main": "electron/main.cjs",
   "workspaces": [
@@ -59,8 +59,10 @@
       ],
       "category": "public.app-category.business",
       "identity": null,
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "mac_config/entitlements.mac.plist",
+      "entitlementsInherit": "mac_config/entitlements.mac.plist"
     }
   },
   "pnpm": {
