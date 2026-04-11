@@ -12,10 +12,22 @@ Built with React, Express, SQLite, and Electron.
 
 Go to the [Releases](../../releases) page and download the latest version for your OS:
 
-- **Windows**: `Lab Scheduler Setup X.X.X.exe` (installer) or `Lab Scheduler X.X.X.exe` (portable, no install needed)
+- **Windows**: `Lab Scheduler Setup X.X.X.exe`
 - **Mac**: `Lab Scheduler-X.X.X.dmg`
 
-Run the installer and the app is ready to use. No other software required.
+**Windows**: Run the installer and the app will install and launch automatically. No other software required.
+
+**macOS**: The app is not code-signed, so macOS will block it by default. To install:
+
+1. Open the DMG and drag **Lab Scheduler** to your **Applications** folder
+2. **Right-click** (or Control-click) the app in Applications and choose **Open**
+3. Click **Open** in the warning dialog that appears
+4. After this first launch, the app will open normally with a double-click going forward
+
+> As an alternative, you can run this in Terminal to remove the quarantine flag:
+> ```bash
+> xattr -cr /Applications/Lab\ Scheduler.app
+> ```
 
 > The database is stored locally on your machine. No internet connection or server setup needed.
 
@@ -74,7 +86,6 @@ pnpm electron:build
 
 Output in `dist-electron/`:
 - `Lab Scheduler Setup X.X.X.exe` — NSIS installer
-- `Lab Scheduler X.X.X.exe` — portable executable
 
 ### Mac
 
