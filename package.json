@@ -49,7 +49,9 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false
+      "allowToChangeInstallationDirectory": false,
+      "allowElevation": true,
+      "runAfterFinish": true
     },
     "mac": {
       "target": [
