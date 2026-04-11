@@ -388,8 +388,7 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
       return station.min_staff ?? 1;
     };
     const getMLTSlotsAnalyze = (station: typeof warnStations[0], shiftName?: string): number => {
-      if (shiftName && shiftName !== 'am') return 0;
-      return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+      return (station as any).min_mlt || (station.require_cls === 1 ? 1 : 0);
     };
     const getMinStaffAnalyze = (station: typeof warnStations[0], shiftName: string): number => {
       return getCLSNeededAnalyze(station, shiftName) + getMLTSlotsAnalyze(station, shiftName);
@@ -430,9 +429,7 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
               }
               if (!suppress) {
                 const shiftName = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
-                // AM: PIVOTAL, PM/Night: INFO (no MLTs expected)
-                const severity = isAMShift ? 'PIVOTAL' : 'INFO';
-                warnings.push(`${severity}: ${station.name} has no MLT assigned on ${group[0].date} (${shiftName})`);
+                warnings.push(`PIVOTAL: ${station.name} has no MLT assigned on ${group[0].date} (${shiftName})`);
               }
             }
           }
@@ -1013,9 +1010,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   };
   // MLT slots: 1 if station allows MLTs (require_cls=1), 0 otherwise
   const getMLTSlots = (station: Station, shiftName?: string): number => {
-    // MLT requirements only apply to AM shift — PM/Night staffing is minimal
-    if (shiftName && shiftName !== 'am') return 0;
-    return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+    return (station as any).min_mlt || (station.require_cls === 1 ? 1 : 0);
   };
   // Chemistry and Hematology/UA can absorb 1 extra CLS as overflow
   const isOverflowStation = (station: Station): boolean => {
@@ -1040,7 +1035,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   const getMaxMLT = (station: Station, shiftName?: string): number => {
     // MLTs are always allowed (up to 1) at stations that require CLS, even on non-AM shifts
     // The difference is: AM *requires* MLT, PM/Night *allows* MLT but doesn't require
-    return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+    return (station as any).min_mlt || (station.require_cls === 1 ? 1 : 0);
   };
 
   // ── Global station placement guard ──
@@ -2557,8 +2552,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
           }
 
-          if (stationAssignees.length > 0 && isAMShift) {
-            // PIVOTAL: no MLT at require_cls station (AM only)
+          if (stationAssignees.length > 0) {
+            // PIVOTAL: no MLT at require_cls station
             if (station.require_cls === 1) {
               const hasMLT = stationAssignees.some(a => empRoleMap.get(a.employee_id) === 'mlt');
               if (!hasMLT) {
@@ -2571,8 +2566,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               }
             }
 
-            // PIVOTAL: no CLS at require_cls station (AM only)
-            if (station.require_cls === 1) {
+            // PIVOTAL: no CLS at require_cls station
+            if (isAMShift && station.require_cls === 1) {
               const hasCLS = stationAssignees.some(a => isCLSRole(a.employee_id, empRoleMap));
               if (!hasCLS) {
                 passWarnings.push(`CRITICAL: ${station.name} has no CLS assigned on ${date} (${shiftLabel})`);
@@ -2697,8 +2692,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       return station.min_staff ?? 1;
     };
     const getMLTSlotsFinal = (station: typeof stations[0], shiftName?: string): number => {
-      if (shiftName && shiftName !== 'am') return 0;
-      return (station as any).min_mlt ?? (station.require_cls === 1 ? 1 : 0);
+      return (station as any).min_mlt || (station.require_cls === 1 ? 1 : 0);
     };
     const getMinStaffFinal = (station: typeof stations[0], shiftName: string): number => {
       return getCLSNeededFinal(station, shiftName) + getMLTSlotsFinal(station, shiftName);
