@@ -28,6 +28,8 @@ export interface Station {
   require_cls: number;
   priority?: number;
   is_active?: number;
+  color?: string;
+  abbr?: string;
 }
 
 export interface Employee {

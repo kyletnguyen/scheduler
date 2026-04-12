@@ -5,8 +5,11 @@ import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths,
 import { useSchedule, useShifts, useWarnings, useDeleteAssignment, useGenerateSchedule } from '../../hooks/useSchedule';
 import { useEmployees } from '../../hooks/useEmployees';
 import { useTimeOff } from '../../hooks/useTimeOff';
+import { useStations, useUpdateStation } from '../../hooks/useStations';
 import AssignmentModal from './AssignmentModal';
-import type { Shift, ScheduleAssignment, Employee } from '../../types';
+import StationStyleEditor from './StationStyleEditor';
+import type { Shift, ScheduleAssignment, Employee, Station } from '../../types';
+import { buildStationStyleMap, getStationStyle, type StationDisplay } from '../../utils/stationStyles';
 import toast from 'react-hot-toast';
 
 
@@ -15,20 +18,6 @@ const SHIFT_ICONS: Record<string, { label: string; bg: string; text: string; rgb
   PM:        { label: 'PM', bg: 'bg-indigo-600',  text: 'text-white', rgb: [79, 70, 229] },
   Night:     { label: 'NS', bg: 'bg-gray-700',    text: 'text-white', rgb: [55, 65, 81] },
 };
-
-// Station abbreviations and colors (Tailwind class + RGB for PDF)
-const STATION_STYLES: Record<string, { abbr: string; color: string; bg: string; rgb: [number, number, number] }> = {
-  'Hematology/UA': { abbr: 'HM', color: 'text-violet-600',   bg: 'bg-violet-500',  rgb: [139, 92, 246] },
-  'Chemistry':     { abbr: 'CH', color: 'text-amber-600',   bg: 'bg-amber-500',   rgb: [217, 119, 6] },
-  'Microbiology':  { abbr: 'MC', color: 'text-emerald-600', bg: 'bg-emerald-500', rgb: [5, 150, 105] },
-  'Blood Bank':    { abbr: 'BB', color: 'text-red-600',     bg: 'bg-red-500',     rgb: [220, 38, 38] },
-  'Admin':         { abbr: 'AD', color: 'text-sky-600',     bg: 'bg-sky-500',     rgb: [14, 165, 233] },
-};
-
-function getStationDisplay(name: string): { abbr: string; color: string; bg: string; rgb: [number, number, number] } {
-  if (STATION_STYLES[name]) return STATION_STYLES[name];
-  return { abbr: name.substring(0, 2).toUpperCase(), color: 'text-gray-500', bg: 'bg-gray-400', rgb: [107, 114, 128] };
-}
 
 export default function MonthGrid() {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -39,8 +28,18 @@ export default function MonthGrid() {
   const { data: rawEmployees = [] } = useEmployees();
   const { data: timeOff = [] } = useTimeOff({ month });
   const { data: liveWarnings = [] } = useWarnings(month);
+  const { data: stationsData = [] } = useStations();
+  const updateStation = useUpdateStation();
   const deleteAssignment = useDeleteAssignment(month);
   const generateSchedule = useGenerateSchedule(month);
+
+  const stationStyleMap = React.useMemo(() => buildStationStyleMap(stationsData), [stationsData]);
+  const getStationDisplay = React.useCallback((name: string): StationDisplay => {
+    if (stationStyleMap[name]) return stationStyleMap[name];
+    return getStationStyle(name, stationsData);
+  }, [stationStyleMap, stationsData]);
+
+  const [editingStation, setEditingStation] = useState<Station | null>(null);
 
   // Sort employees: group by shift (AM → PM → Night → Floater), then alphabetize within group
   const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
@@ -106,7 +105,7 @@ export default function MonthGrid() {
   }
 
   // Index: date -> list of coverage issues (parsed from warnings)
-  const stationNames = Object.keys(STATION_STYLES);
+  const stationNames = stationsData.map(s => s.name);
   const coverageByDate = new Map<string, { shift: string; station: string; severity: 'critical' | 'warn' | 'info' | 'suggestion'; message: string }[]>();
   for (const w of warnings) {
     const dateMatch = w.match(/(\d{4}-\d{2}-\d{2})/);
@@ -225,9 +224,11 @@ export default function MonthGrid() {
         pdf.text('Stations:', lx, ly);
         lx += pdf.getTextWidth('Stations:') + 6;
 
-        const legendItems: { abbr: string; rgb: [number, number, number]; label: string }[] = [
-          ...Object.entries(STATION_STYLES).map(([name, info]) => ({ abbr: info.abbr, rgb: info.rgb, label: name })),
-        ];
+        const legendItems: { abbr: string; rgb: [number, number, number]; label: string }[] =
+          stationsData.map(s => {
+            const style = getStationDisplay(s.name);
+            return { abbr: style.abbr, rgb: style.rgb, label: s.name };
+          });
         for (const item of legendItems) {
           const [r, g, b] = item.rgb;
           pdf.setFillColor(r, g, b);
@@ -564,7 +565,7 @@ export default function MonthGrid() {
       pm: { stationIssues: new Map(), noCoverageDates: [] },
       night: { stationIssues: new Map(), noCoverageDates: [] },
     };
-    const sNames = Object.keys(STATION_STYLES);
+    const sNames = stationsData.map(s => s.name);
 
     for (const w of warnings) {
       // "No coverage" warnings
@@ -654,7 +655,7 @@ export default function MonthGrid() {
             {data.stationIssues.size > 0 && (
               <div className="p-2 grid grid-cols-2 lg:grid-cols-4 gap-2">
                 {[...data.stationIssues.entries()].map(([stationName, issues]) => {
-                  const stationInfo = STATION_STYLES[stationName];
+                  const stationInfo = getStationDisplay(stationName);
                   const criticalIssues = issues.filter(i => i.severity === 'critical');
                   const warnIssues = issues.filter(i => i.severity === 'warn');
                   const infoIssues = issues.filter(i => i.severity === 'info');
@@ -670,9 +671,9 @@ export default function MonthGrid() {
 
                   return (
                     <div key={stationName} className="border rounded overflow-hidden">
-                      <div className={`${stationInfo?.bg ?? 'bg-gray-500'} px-2 py-1 flex items-center justify-between`}>
+                      <div className="px-2 py-1 flex items-center justify-between" style={{ backgroundColor: stationInfo.color }}>
                         <span className="text-white text-[10px] font-bold">
-                          {stationInfo?.abbr ?? '??'} {stationName}
+                          {stationInfo.abbr} {stationName}
                           {hasCrit && ' !'}
                         </span>
                         <span className="text-white/70 text-[9px]">{issues.length}</span>
@@ -795,14 +796,46 @@ export default function MonthGrid() {
         </div>
         <div className="border-l pl-4 flex items-center gap-2">
           <span className="text-gray-500">Stations:</span>
-          {Object.entries(STATION_STYLES).map(([name, { abbr, bg }]) => (
-            <div key={name} className="flex items-center gap-1">
-              <span className={`w-5 h-4 rounded text-[9px] font-bold flex items-center justify-center ${bg} text-white`}>{abbr}</span>
-              <span className="text-gray-600 text-[10px]">{name}</span>
-            </div>
-          ))}
+          {stationsData.map(station => {
+            const style = getStationDisplay(station.name);
+            return (
+              <div
+                key={station.id}
+                className="flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={() => setEditingStation(station)}
+                title={`Click to customize ${station.name}`}
+              >
+                <span
+                  className="w-5 h-4 rounded text-[9px] font-bold flex items-center justify-center text-white"
+                  style={{ backgroundColor: style.color }}
+                >{style.abbr}</span>
+                <span className="text-gray-600 text-[10px]">{station.name}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
+
+      {/* Station style editor popover */}
+      {editingStation && (
+        <StationStyleEditor
+          station={editingStation}
+          currentStyle={getStationDisplay(editingStation.name)}
+          onSave={(color, abbr) => {
+            updateStation.mutate(
+              { id: editingStation.id, name: editingStation.name, color, abbr },
+              {
+                onSuccess: () => {
+                  toast.success(`Updated ${editingStation.name} style`);
+                  setEditingStation(null);
+                },
+                onError: (err) => toast.error(err.message),
+              }
+            );
+          }}
+          onClose={() => setEditingStation(null)}
+        />
+      )}
 
       {/* Warnings are now shown inline within each shift section of the grid */}
 
@@ -935,7 +968,7 @@ export default function MonthGrid() {
                         );
                       } else if (station) {
                         cellContent = (
-                          <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${station.bg} text-white shadow-sm`}>
+                          <span className="w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center text-white shadow-sm" style={{ backgroundColor: station.color }}>
                             {station.abbr}
                           </span>
                         );
@@ -1008,7 +1041,7 @@ export default function MonthGrid() {
                               : null;
                             if (station) {
                               guestCell = (
-                                <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${station.bg} text-white shadow-sm`}>
+                                <span className="w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center text-white shadow-sm" style={{ backgroundColor: station.color }}>
                                   {station.abbr}
                                 </span>
                               );
@@ -1188,7 +1221,7 @@ export default function MonthGrid() {
                               {sortedStations.map(([sName, count]) => {
                                 const sd = getStationDisplay(sName);
                                 return (
-                                  <span key={sName} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${sd.bg} text-white`} title={`${sName}: ${count} day${count !== 1 ? 's' : ''}`}>
+                                  <span key={sName} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-white" style={{ backgroundColor: sd.color }} title={`${sName}: ${count} day${count !== 1 ? 's' : ''}`}>
                                     {sd.abbr}
                                     <span className="text-white/80">{count}</span>
                                   </span>
@@ -1324,7 +1357,7 @@ export default function MonthGrid() {
                       if (!stationGroups.has(sName)) stationGroups.set(sName, []);
                       stationGroups.get(sName)!.push(a);
                     }
-                    // Sort: real stations first (by STATION_STYLES order), Admin last
+                    // Sort: real stations first, Admin last
                     const stationOrder = ['Hematology/UA', 'Chemistry', 'Microbiology', 'Blood Bank', 'Admin', 'Unassigned'];
                     const sortedStations = [...stationGroups.keys()].sort((a, b) => {
                       const ai = stationOrder.indexOf(a); const bi = stationOrder.indexOf(b);
@@ -1338,7 +1371,7 @@ export default function MonthGrid() {
                           return (
                             <div key={sName}>
                               <div className="flex items-center gap-1.5 mb-1">
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${stationDisplay.bg} text-white`}>
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: stationDisplay.color }}>
                                   {stationDisplay.abbr}
                                 </span>
                                 <span className="text-xs font-semibold text-gray-600">{sName}</span>
@@ -1445,7 +1478,7 @@ export default function MonthGrid() {
                       return (
                         <div key={station}>
                           <div className="flex items-center gap-2 text-sm">
-                            <span className={`${sd.bg} text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0`}>
+                            <span className="text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0" style={{ backgroundColor: sd.color }}>
                               {sd.abbr}
                             </span>
                             <span className="text-gray-700 flex-1 font-medium">{station}</span>
@@ -1454,7 +1487,7 @@ export default function MonthGrid() {
                           </div>
                           <div className="ml-9 mt-0.5">
                             <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                              <div className={`h-full ${sd.bg} rounded-full`} style={{ width: `${pct}%` }} />
+                              <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: sd.color }} />
                             </div>
                           </div>
                         </div>

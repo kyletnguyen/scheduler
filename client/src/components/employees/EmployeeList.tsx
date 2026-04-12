@@ -1,20 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { format, addMonths } from 'date-fns';
 import { useEmployees, useCreateEmployee, useDeleteEmployee } from '../../hooks/useEmployees';
 import { useSchedule } from '../../hooks/useSchedule';
 import { useTimeOff } from '../../hooks/useTimeOff';
+import { useStations } from '../../hooks/useStations';
 import EmployeeForm from './EmployeeForm';
 import EmployeeModal from './EmployeeModal';
 import type { Employee, DefaultShift } from '../../types';
+import { buildStationStyleMap, getStationStyle } from '../../utils/stationStyles';
 import toast from 'react-hot-toast';
-
-const STATION_STYLES: Record<string, { abbr: string; bg: string }> = {
-  'Hematology/UA': { abbr: 'HM', bg: 'bg-violet-500' },
-  'Chemistry':     { abbr: 'CH', bg: 'bg-amber-500' },
-  'Microbiology':  { abbr: 'MC', bg: 'bg-emerald-500' },
-  'Blood Bank':    { abbr: 'BB', bg: 'bg-red-500' },
-  'Admin':         { abbr: 'AD', bg: 'bg-sky-500' },
-};
 
 const typeColors: Record<string, string> = {
   'full-time': 'bg-green-100 text-green-800',
@@ -63,8 +57,11 @@ function summarizeConstraints(emp: Employee): string[] {
 
 export default function EmployeeList() {
   const { data: employees, isLoading } = useEmployees();
+  const { data: stationsData = [] } = useStations();
   const createMutation = useCreateEmployee();
   const deleteMutation = useDeleteEmployee();
+
+  const stationStyleMap = useMemo(() => buildStationStyleMap(stationsData), [stationsData]);
 
   const thisMonth = format(new Date(), 'yyyy-MM');
   const nextMonth = format(addMonths(new Date(), 1), 'yyyy-MM');
@@ -324,11 +321,11 @@ export default function EmployeeList() {
                         {sorted.length > 0 ? (
                           <div className="space-y-1.5">
                             {sorted.map(([station, count]) => {
-                              const style = STATION_STYLES[station] ?? { abbr: station.substring(0, 2).toUpperCase(), bg: 'bg-gray-400' };
+                              const style = stationStyleMap[station] ?? getStationStyle(station, stationsData);
                               const dates = stationDates[station].sort();
                               return (
                                 <div key={station} className="flex items-start gap-2">
-                                  <span className={`${style.bg} text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0`}>
+                                  <span className="text-white text-[10px] font-bold px-2 py-0.5 rounded shrink-0" style={{ backgroundColor: style.color }}>
                                     {style.abbr}
                                   </span>
                                   <div>

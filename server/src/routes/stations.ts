@@ -12,6 +12,8 @@ const stationSchema = z.object({
   min_staff_pm: z.number().int().min(0).optional(),
   min_staff_night: z.number().int().min(0).optional(),
   require_cls: z.number().int().min(0).max(1).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  abbr: z.string().min(1).max(4).optional(),
 });
 
 // List all active stations
@@ -71,6 +73,14 @@ router.put('/:id', (req, res) => {
   if (parsed.data.require_cls !== undefined) {
     setClauses.push('require_cls = ?');
     values.push(parsed.data.require_cls);
+  }
+  if (parsed.data.color !== undefined) {
+    setClauses.push('color = ?');
+    values.push(parsed.data.color);
+  }
+  if (parsed.data.abbr !== undefined) {
+    setClauses.push('abbr = ?');
+    values.push(parsed.data.abbr);
   }
   values.push(req.params.id);
   const result = db.prepare(`UPDATE stations SET ${setClauses.join(', ')} WHERE id = ? AND is_active = 1`).run(...values);

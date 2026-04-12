@@ -16,7 +16,7 @@ export function useCreateStation() {
 export function useUpdateStation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...data }: { id: number; name: string; min_staff?: number; max_staff?: number; min_staff_am?: number; min_staff_pm?: number; min_staff_night?: number; require_cls?: number }) => updateStation(id, data),
+    mutationFn: ({ id, ...data }: { id: number; name: string; min_staff?: number; max_staff?: number; min_staff_am?: number; min_staff_pm?: number; min_staff_night?: number; require_cls?: number; color?: string; abbr?: string }) => updateStation(id, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['stations'] }),
   });
 }

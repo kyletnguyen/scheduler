@@ -18,7 +18,7 @@ export async function createStation(name: string): Promise<Station> {
   return res.json();
 }
 
-export async function updateStation(id: number, data: { name: string; min_staff?: number; max_staff?: number; min_staff_am?: number; min_staff_pm?: number; min_staff_night?: number; require_cls?: number }): Promise<Station> {
+export async function updateStation(id: number, data: { name: string; min_staff?: number; max_staff?: number; min_staff_am?: number; min_staff_pm?: number; min_staff_night?: number; require_cls?: number; color?: string; abbr?: string }): Promise<Station> {
   const res = await fetch(`${BASE}/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
