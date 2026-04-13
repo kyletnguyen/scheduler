@@ -2011,15 +2011,28 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         // there for part of the shift so the station needs two people.
         {
           const date = group[0].date;
+          // Log partialPTOSet size on first pass for first group only
+          if (passIdx === 0 && groupKey === sortedGroupKeys[0]) {
+            console.log(`[PTO-DEBUG] partialPTOSet size: ${partialPTOSet.size}, entries: ${[...partialPTOSet].join(', ')}`);
+          }
           for (const station of realStations) {
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
             const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
             if (partialEmps.length === 0) continue;
             const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
+
+            const partialNames = partialEmps.map(([eid]) => employees.find(e => e.id === eid)?.name ?? eid).join(', ');
+            console.log(`[PTO-DEBUG] ${date} pass${passIdx} ${station.name}: partial=[${partialNames}] fullDay=${fullDayCovers.length} assignees=${stationAssignees.length}`);
+
             if (fullDayCovers.length > 0) continue; // already covered
 
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
+
+            // Log all candidates for each strategy
+            const unassigned = pool.filter(a => !stationMap.has(a.employee_id));
+            const qualUnassigned = unassigned.filter(a => isQualified(a.employee_id));
+            console.log(`[PTO-DEBUG]   S1: ${unassigned.length} unassigned, ${qualUnassigned.length} qualified`);
 
             let filled = false;
 
@@ -2027,6 +2040,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             for (const a of pool) {
               if (stationMap.has(a.employee_id)) continue;
               if (!isQualified(a.employee_id)) continue;
+              const name = employees.find(e => e.id === a.employee_id)?.name;
+              console.log(`[PTO-DEBUG]   S1: placing ${name} at ${station.name}`);
               _origSet(a.employee_id, station.id);
               filled = true;
               break;
@@ -2034,6 +2049,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             if (filled) continue;
 
             // Strategy 2: pull from an overstaffed station (above min)
+            {
+              const overstaffed = realStations.filter(os => {
+                if (os.id === station.id) return false;
+                const cnt = [...stationMap.entries()].filter(([, sid]) => sid === os.id).length;
+                return cnt > getMinStaff(os, shiftName);
+              });
+              console.log(`[PTO-DEBUG]   S2: ${overstaffed.length} overstaffed stations: ${overstaffed.map(s => `${s.name}(${[...stationMap.values()].filter(v => v === s.id).length}/${getMinStaff(s, shiftName)})`).join(', ')}`);
+            }
             for (const otherStation of realStations) {
               if (otherStation.id === station.id) continue;
               const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
@@ -2042,6 +2065,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
               for (const [eid] of otherAssignees) {
                 if (!isQualified(eid)) continue;
+                const name = employees.find(e => e.id === eid)?.name;
+                console.log(`[PTO-DEBUG]   S2: pulling ${name} from ${otherStation.name}`);
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
                 filled = true;
@@ -2052,20 +2077,34 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             if (filled) continue;
 
             // Strategy 3: pull an admin/supervisor from ANY station
-            const allAdmins = [...stationMap.entries()]
-              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
+            const allAdminsList = [...stationMap.entries()]
+              .filter(([eid]) => empRoleMap.get(eid) === 'admin');
+            const qualAdmins = allAdminsList.filter(([eid]) => isQualified(eid));
+            console.log(`[PTO-DEBUG]   S3: ${allAdminsList.length} total admins, ${qualAdmins.length} qualified for ${station.name}`);
+            for (const [eid] of allAdminsList) {
+              const name = employees.find(e => e.id === eid)?.name;
+              const atSid = stationMap.get(eid);
+              const atName = stations.find(s => s.id === atSid)?.name ?? '?';
+              const quals = (empStationMap.get(eid) ?? []).map(q => stations.find(s => s.id === q)?.name ?? q);
+              console.log(`[PTO-DEBUG]     admin: ${name} at ${atName}, quals=[${quals.join(',')}], qualForBB=${isQualified(eid)}`);
+            }
+            const allAdmins = qualAdmins
               .sort(([, sidA], [, sidB]) => {
                 const aIsAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
                 const bIsAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
                 return aIsAdmin - bIsAdmin;
               });
             for (const [eid] of allAdmins) {
+              const name = employees.find(e => e.id === eid)?.name;
+              console.log(`[PTO-DEBUG]   S3: placing ${name} at ${station.name}`);
               stationMap.delete(eid);
               _origSet(eid, station.id);
               filled = true;
               break;
             }
             if (filled) continue;
+
+            console.log(`[PTO-DEBUG]   S3: no qualified admins found`);
 
             // Strategy 4: chain swap — move a qualified CLS from another station
             // to cover here, and backfill their station with an admin.
