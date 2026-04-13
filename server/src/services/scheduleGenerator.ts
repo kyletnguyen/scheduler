@@ -507,9 +507,10 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
     }
   }
 
-  // 2) Partial PTO coverage gap — station's only employee(s) have partial PTO,
-  //    no full-day backup is assigned to cover the rest of the shift
+  // 2) Partial PTO coverage gap — role-aware: MLT leaving needs MLT cover
   const warnStationsPartial = stations.filter(s => s.name !== 'Admin');
+  const roleMapAnalyze = new Map<number, string>();
+  for (const emp of employees) roleMapAnalyze.set(emp.id, emp.role);
   for (const shift of shifts) {
     const shiftLabel = shift.name;
     for (const date of dates) {
@@ -519,8 +520,14 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
         if (stationAssignees.length === 0) continue;
         const partialEmps = stationAssignees.filter(a => partialPTOSetAnalyze.has(`${a.employee_id}-${date}`));
         if (partialEmps.length === 0) continue;
-        const fullDayEmps = stationAssignees.filter(a => !partialPTOSetAnalyze.has(`${a.employee_id}-${date}`));
-        if (fullDayEmps.length > 0) continue; // has full-day coverage
+        const pRole = roleMapAnalyze.get(partialEmps[0].employee_id);
+        const fullDayEmps = stationAssignees.filter(a => {
+          if (partialPTOSetAnalyze.has(`${a.employee_id}-${date}`)) return false;
+          const r = roleMapAnalyze.get(a.employee_id);
+          if (pRole === 'mlt') return r === 'mlt';
+          return r === 'cls' || r === 'admin';
+        });
+        if (fullDayEmps.length > 0) continue;
         const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
         warnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift (${shiftLabel})`);
       }
@@ -2446,14 +2453,20 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
             const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
             if (partialEmps.length === 0) continue;
-            const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
+
+            // Role-aware coverage check: an MLT leaving needs another MLT to cover,
+            // not just any full-day person. A CLS at the same station doesn't count.
+            const partialRole = empRoleMap.get(partialEmps[0][0]);
+            const fullDayCovers = stationAssignees.filter(([eid]) => {
+              if (partialPTOSet.has(`${eid}-${date}`)) return false; // also partial
+              const role = empRoleMap.get(eid);
+              if (partialRole === 'mlt') return role === 'mlt'; // only MLT covers MLT
+              return role === 'cls' || role === 'admin'; // CLS/admin covers CLS
+            });
             if (fullDayCovers.length > 0) continue;
 
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
-
-            // Role matching: MLT positions need MLT cover, CLS positions need CLS/Admin cover
-            const partialRole = empRoleMap.get(partialEmps[0][0]);
             const canCoverRole = (eid: number): boolean => {
               const role = empRoleMap.get(eid);
               if (partialRole === 'mlt') return role === 'mlt';
@@ -2723,7 +2736,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           if (stationAssignees.length === 0) continue;
           const partialEmps = stationAssignees.filter(a => partialPTOSet.has(`${a.employee_id}-${date}`));
           if (partialEmps.length === 0) continue;
-          const fullCoverageEmps = stationAssignees.filter(a => !partialPTOSet.has(`${a.employee_id}-${date}`));
+          // Role-aware: MLT leaving needs MLT cover, CLS needs CLS/admin
+          const pRole = empRoleMap.get(partialEmps[0].employee_id);
+          const fullCoverageEmps = stationAssignees.filter(a => {
+            if (partialPTOSet.has(`${a.employee_id}-${date}`)) return false;
+            const r = empRoleMap.get(a.employee_id);
+            if (pRole === 'mlt') return r === 'mlt';
+            return r === 'cls' || r === 'admin';
+          });
           if (fullCoverageEmps.length === 0) {
             const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
             const diagInfo = ptoCoverageDiag?.get(`${station.id}-${date}`) ?? '';
