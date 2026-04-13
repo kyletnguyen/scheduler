@@ -896,14 +896,115 @@ const PercentSlider = React.memo(function PercentSlider({
   );
 });
 
+// Redistribute: keep changedId at newValue, scale others proportionally so sum = 100.
+function redistribute(current: Map<number, number>, changedId: number, newValue: number): Map<number, number> {
+  const clamped = Math.max(0, Math.min(100, Math.round(newValue)));
+  if (current.size <= 1) {
+    const out = new Map<number, number>();
+    out.set(changedId, 100);
+    return out;
+  }
+  const others = [...current.entries()].filter(([id]) => id !== changedId);
+  const remaining = 100 - clamped;
+  const othersTotal = others.reduce((a, [, v]) => a + v, 0);
+  const out = new Map<number, number>();
+  out.set(changedId, clamped);
+  if (othersTotal === 0) {
+    const each = Math.floor(remaining / others.length);
+    let leftover = remaining - each * others.length;
+    for (const [id] of others) {
+      out.set(id, each + (leftover > 0 ? 1 : 0));
+      if (leftover > 0) leftover--;
+    }
+  } else {
+    const scaled: { id: number; exact: number; floor: number }[] = others.map(([id, v]) => {
+      const exact = (v / othersTotal) * remaining;
+      return { id, exact, floor: Math.floor(exact) };
+    });
+    const floorSum = scaled.reduce((a, b) => a + b.floor, 0);
+    let leftover = remaining - floorSum;
+    scaled.sort((a, b) => (b.exact - b.floor) - (a.exact - a.floor));
+    for (const item of scaled) {
+      out.set(item.id, item.floor + (leftover > 0 ? 1 : 0));
+      if (leftover > 0) leftover--;
+    }
+  }
+  return out;
+}
+
+/** SVG Pie chart — read-only visual showing station distribution */
+function StationPieChart({ slices, size = 140 }: {
+  slices: { color: string; abbr: string; pct: number }[];
+  size?: number;
+}) {
+  const r = size / 2;
+  const ir = r * 0.55; // donut inner radius
+  let cumAngle = -90; // start at top
+
+  const paths = slices.map((slice, i) => {
+    if (slice.pct <= 0) return null;
+    const angle = (slice.pct / 100) * 360;
+    const startAngle = cumAngle;
+    cumAngle += angle;
+    const endAngle = cumAngle;
+
+    // Full circle special case
+    if (slice.pct >= 100) {
+      return (
+        <circle key={i} cx={r} cy={r} r={(r + ir) / 2} fill="none"
+          stroke={slice.color} strokeWidth={r - ir} />
+      );
+    }
+
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const x1 = r + r * Math.cos(toRad(startAngle));
+    const y1 = r + r * Math.sin(toRad(startAngle));
+    const x2 = r + r * Math.cos(toRad(endAngle));
+    const y2 = r + r * Math.sin(toRad(endAngle));
+    const ix1 = r + ir * Math.cos(toRad(startAngle));
+    const iy1 = r + ir * Math.sin(toRad(startAngle));
+    const ix2 = r + ir * Math.cos(toRad(endAngle));
+    const iy2 = r + ir * Math.sin(toRad(endAngle));
+    const large = angle > 180 ? 1 : 0;
+
+    // Label position (midpoint of arc)
+    const midAngle = toRad(startAngle + angle / 2);
+    const lr = (r + ir) / 2;
+    const lx = r + lr * Math.cos(midAngle);
+    const ly = r + lr * Math.sin(midAngle);
+
+    return (
+      <g key={i}>
+        <path
+          d={`M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${ir} ${ir} 0 ${large} 0 ${ix1} ${iy1} Z`}
+          fill={slice.color}
+        />
+        {angle > 20 && (
+          <text x={lx} y={ly} textAnchor="middle" dominantBaseline="central"
+            className="text-[9px] font-bold fill-white pointer-events-none" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>
+            {slice.abbr}
+          </text>
+        )}
+      </g>
+    );
+  });
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {/* Empty state ring */}
+      <circle cx={r} cy={r} r={(r + ir) / 2} fill="none" stroke="#e5e7eb" strokeWidth={r - ir} />
+      {paths}
+    </svg>
+  );
+}
+
 function StationsTab({ employee, onClose }: { employee: Employee; onClose: () => void }) {
   const { data: allStations = [] } = useStations();
   const saveMutation = useSaveEmployeeStations();
 
   const stationStyleMap = useMemo(() => buildStationStyleMap(allStations), [allStations]);
 
-  // Each slider is independent — no auto-redistribution.
-  // User sets each value, we show the total, and normalize on save.
+  // Percents always sum to 100 — moving one slider redistributes the others.
   const [percents, setPercents] = useState<Map<number, number>>(() => {
     const raw = new Map<number, number>();
     for (const s of employee.stations ?? []) {
@@ -912,36 +1013,25 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
     return normalizeToPercents(raw);
   });
 
-  const total = useMemo(() => {
-    let sum = 0;
-    for (const v of percents.values()) sum += v;
-    return sum;
-  }, [percents]);
-
   const toggleStation = (id: number) => {
     const next = new Map(percents);
     if (next.has(id)) {
       next.delete(id);
+      setPercents(normalizeToPercents(next));
     } else {
-      // New station gets an equal share of what's remaining (or a fair split)
-      const remaining = Math.max(0, 100 - total);
-      next.set(id, remaining > 0 ? remaining : Math.round(100 / (next.size + 1)));
+      const newCount = next.size + 1;
+      const newShare = Math.round(100 / newCount);
+      next.set(id, 0);
+      setPercents(redistribute(next, id, newShare));
     }
-    setPercents(next);
   };
 
   const commitPercent = useCallback((id: number, value: number) => {
-    setPercents(prev => {
-      const next = new Map(prev);
-      next.set(id, Math.max(0, Math.min(100, Math.round(value))));
-      return next;
-    });
+    setPercents(prev => redistribute(prev, id, value));
   }, []);
 
   const handleSave = () => {
-    // Normalize to 100% on save so the algorithm gets clean percentages
-    const normalized = normalizeToPercents(percents);
-    const payload = [...normalized.entries()].map(([station_id, weight]) => ({ station_id, weight }));
+    const payload = [...percents.entries()].map(([station_id, weight]) => ({ station_id, weight }));
     saveMutation.mutate(
       { employeeId: employee.id, stations: payload },
       {
@@ -952,14 +1042,26 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
   };
 
   const selectedCount = allStations.filter(s => percents.has(s.id)).length;
-  const isExact = total === 100;
-  const diff = total - 100;
+
+  // Build pie slices from selected stations (DB order)
+  const pieSlices = useMemo(() =>
+    allStations
+      .filter(s => percents.has(s.id))
+      .map(s => {
+        const style = stationStyleMap[s.name];
+        return {
+          color: style?.color ?? '#16a34a',
+          abbr: style?.abbr ?? s.name.charAt(0),
+          pct: percents.get(s.id) ?? 0,
+        };
+      }),
+    [percents, allStations, stationStyleMap]
+  );
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-500">
-        Click a station to add it, then set each percentage independently.
-        Values will be normalized to 100% when saved.
+        Click a station to add it. Drag a slider to adjust — the others auto-balance to keep 100%.
       </p>
 
       {/* Station toggle pills */}
@@ -987,26 +1089,16 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
         )}
       </div>
 
-      {/* Percentage sliders — order follows allStations (DB order), never reorders */}
+      {/* Pie chart + sliders */}
       {selectedCount > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Station Mix</span>
-            <span className={`text-sm font-bold tabular-nums px-2 py-0.5 rounded ${
-              isExact
-                ? 'text-green-700 bg-green-100'
-                : diff > 0
-                  ? 'text-red-700 bg-red-100'
-                  : 'text-amber-700 bg-amber-100'
-            }`}>
-              {total}%{!isExact && (
-                <span className="font-normal text-xs ml-1">
-                  ({diff > 0 ? `+${diff}` : diff} from 100)
-                </span>
-              )}
-            </span>
+        <div className="flex gap-5 items-start">
+          {/* Pie */}
+          <div className="shrink-0">
+            <StationPieChart slices={pieSlices} />
           </div>
-          <div className="space-y-2">
+
+          {/* Sliders */}
+          <div className="flex-1 space-y-2 min-w-0">
             {allStations
               .filter(s => percents.has(s.id))
               .map((station) => {
@@ -1026,16 +1118,11 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
                 );
               })}
           </div>
-          {!isExact && (
-            <p className="text-xs text-red-500 mt-1.5">
-              Total must equal 100% before saving.
-            </p>
-          )}
         </div>
       )}
 
       <div className="pt-1">
-        <button onClick={handleSave} disabled={saveMutation.isPending || selectedCount === 0 || !isExact}
+        <button onClick={handleSave} disabled={saveMutation.isPending || selectedCount === 0}
           className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
           {saveMutation.isPending ? 'Saving...' : 'Save Preferences'}
         </button>
