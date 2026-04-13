@@ -359,17 +359,20 @@ export default function MonthGrid() {
               const icon = SHIFT_ICONS[assignment.shift_name];
               const stationDisplay = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
 
-              // Check if covering partial PTO — same logic as web view
+              // Check if covering partial PTO — role-aware: only same-role matches
               const homeStationName = emp.role === 'admin' ? 'Admin'
                 : emp.stations?.[0]?.name ?? null;
               const isAtHomeStation = homeStationName === assignment.station_name;
-              const hasPTOCoworker = assignment.station_id != null && assignments.some(other =>
-                other.id !== assignment.id
-                && other.date === dateStr
-                && other.station_id === assignment.station_id
-                && timeOffIndex.get(other.employee_id)?.get(dateStr) === 'custom'
-              );
-              const isCoveringPTO = hasPTOCoworker && !isAtHomeStation;
+              const hasSameRolePTOCoworker = assignment.station_id != null && assignments.some(other => {
+                if (other.id === assignment.id || other.date !== dateStr || other.station_id !== assignment.station_id) return false;
+                if (timeOffIndex.get(other.employee_id)?.get(dateStr) !== 'custom') return false;
+                const otherEmp = employees.find(e => e.id === other.employee_id);
+                if (!otherEmp) return false;
+                // MLT covers MLT, CLS/admin covers CLS
+                if (otherEmp.role === 'mlt') return emp.role === 'mlt';
+                return emp.role === 'cls' || emp.role === 'admin';
+              });
+              const isCoveringPTO = hasSameRolePTOCoworker && !isAtHomeStation;
 
               if (isCrossShift && icon) {
                 cells.push(icon.label);
@@ -1040,18 +1043,19 @@ export default function MonthGrid() {
                         : null;
 
                       // Check if this employee was moved to cover a partial PTO coworker.
-                      // Only true if: (a) someone at the same station has partial PTO, AND
-                      // (b) this employee's home station is different (they were reassigned).
+                      // Role-aware: MLT only covers MLT, CLS/admin covers CLS.
                       const homeStationName = emp.role === 'admin' ? 'Admin'
                         : emp.stations?.[0]?.name ?? null;
                       const isAtHomeStation = homeStationName === assignment.station_name;
-                      const hasPTOCoworker = assignment.station_id != null && assignments.some(other =>
-                        other.id !== assignment.id
-                        && other.date === dateStr
-                        && other.station_id === assignment.station_id
-                        && timeOffIndex.get(other.employee_id)?.get(dateStr) === 'custom'
-                      );
-                      const isCoveringPartialPTO = hasPTOCoworker && !isAtHomeStation;
+                      const hasSameRolePTOCoworker = assignment.station_id != null && assignments.some(other => {
+                        if (other.id === assignment.id || other.date !== dateStr || other.station_id !== assignment.station_id) return false;
+                        if (timeOffIndex.get(other.employee_id)?.get(dateStr) !== 'custom') return false;
+                        const otherEmp = employees.find(e => e.id === other.employee_id);
+                        if (!otherEmp) return false;
+                        if (otherEmp.role === 'mlt') return emp.role === 'mlt';
+                        return emp.role === 'cls' || emp.role === 'admin';
+                      });
+                      const isCoveringPartialPTO = hasSameRolePTOCoworker && !isAtHomeStation;
 
                       if (isCrossShift && icon) {
                         // Show shift badge in home row when working a different shift
@@ -1484,19 +1488,25 @@ export default function MonthGrid() {
                               <div className="space-y-0.5 pl-1">
                                 {(() => {
                                   // Find who has partial PTO in this station group
-                                  const partialPTONames = group
+                                  const partialPTOEmps = group
                                     .filter(a => timeOffIndex.get(a.employee_id)?.get(date) === 'custom')
-                                    .map(a => a.employee_name);
+                                    .map(a => ({ name: a.employee_name, role: employees.find(e => e.id === a.employee_id)?.role }));
                                   return group.map(a => {
                                     const empInfo = employees.find(e => e.id === a.employee_id);
                                     const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
                                       : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
                                       : 'bg-blue-100 text-blue-700';
                                     const isPartialPTO = timeOffIndex.get(a.employee_id)?.get(date) === 'custom';
-                                    // Only show "covers" if this person was moved here (not their home station)
+                                    // Role-aware: only show "covers" for same-role partial PTO coworker
                                     const empHome = empInfo?.role === 'admin' ? 'Admin'
                                       : empInfo?.stations?.[0]?.name ?? null;
-                                    const isCovering = !isPartialPTO && partialPTONames.length > 0
+                                    const sameRolePTONames = partialPTOEmps
+                                      .filter(p => {
+                                        if (p.role === 'mlt') return empInfo?.role === 'mlt';
+                                        return empInfo?.role === 'cls' || empInfo?.role === 'admin';
+                                      })
+                                      .map(p => p.name);
+                                    const isCovering = !isPartialPTO && sameRolePTONames.length > 0
                                       && empHome !== sName;
                                     return (
                                       <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
@@ -1511,7 +1521,7 @@ export default function MonthGrid() {
                                         )}
                                         {isCovering && (
                                           <span className="text-[9px] px-1.5 py-0.5 rounded-sm font-bold bg-amber-100 text-amber-700 border border-amber-200">
-                                            covers 2nd half for {partialPTONames.join(', ')}
+                                            covers 2nd half for {sameRolePTONames.join(', ')}
                                           </span>
                                         )}
                                       </div>
