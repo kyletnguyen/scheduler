@@ -2508,21 +2508,68 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               if (filled) continue;
             }
 
-            // S3b: pull admin-parked MLT from Admin station (for MLT positions)
-            // Admin-parked MLTs sit at Admin desk but can cover bench MLT slots
-            if (partialRole === 'mlt' && adminStation) {
+            // S3b: pull admin-parked MLT from ANY station (for MLT positions)
+            // Admin-parked MLTs default to Admin desk but may have been moved to
+            // another bench station by Layer 5 or gapFill — search everywhere.
+            // Prefer those at Admin first (less disruptive to pull from desk).
+            if (partialRole === 'mlt') {
               const parkedMLTs = [...stationMap.entries()]
-                .filter(([eid, sid]) =>
-                  sid === adminStation.id
-                  && empRoleMap.get(eid) === 'mlt'
+                .filter(([eid]) =>
+                  empRoleMap.get(eid) === 'mlt'
                   && isAdminParked(eid)
                   && isQualified(eid)
-                );
+                )
+                .sort(([, sidA], [, sidB]) => {
+                  const aAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
+                  const bAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
+                  return aAdmin - bAdmin;
+                });
               for (const [eid] of parkedMLTs) {
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
                 filled = true;
                 break;
+              }
+              if (filled) continue;
+            }
+
+            // S3c: pull ANY MLT from any station (for MLT positions)
+            // If no admin-parked MLT found, try regular MLTs from other stations.
+            // Prefer MLTs at Admin desk, then those at overstaffed stations.
+            if (partialRole === 'mlt') {
+              const allMLTs = [...stationMap.entries()]
+                .filter(([eid, sid]) =>
+                  sid !== station.id
+                  && empRoleMap.get(eid) === 'mlt'
+                  && isQualified(eid)
+                )
+                .sort(([, sidA], [, sidB]) => {
+                  // Prefer Admin desk first, then by station staff surplus
+                  const aAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
+                  const bAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
+                  if (aAdmin !== bAdmin) return aAdmin - bAdmin;
+                  const aSurplus = [...stationMap.values()].filter(v => v === sidA).length - getMinStaff(realStations.find(s => s.id === sidA) ?? realStations[0], shiftName);
+                  const bSurplus = [...stationMap.values()].filter(v => v === sidB).length - getMinStaff(realStations.find(s => s.id === sidB) ?? realStations[0], shiftName);
+                  return bSurplus - aSurplus; // higher surplus first
+                });
+              for (const [eid, fromSid] of allMLTs) {
+                // Only pull if their current station won't be left without an MLT
+                // OR they're at Admin (always OK to pull)
+                if (adminStation && fromSid === adminStation.id) {
+                  stationMap.delete(eid);
+                  _origSet(eid, station.id);
+                  filled = true;
+                  break;
+                }
+                const fromStation = realStations.find(s => s.id === fromSid);
+                if (!fromStation) continue;
+                const fromCount = [...stationMap.values()].filter(v => v === fromSid).length;
+                if (fromCount > getMinStaff(fromStation, shiftName)) {
+                  stationMap.delete(eid);
+                  _origSet(eid, station.id);
+                  filled = true;
+                  break;
+                }
               }
               if (filled) continue;
             }
