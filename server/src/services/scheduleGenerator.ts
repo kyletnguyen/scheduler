@@ -567,9 +567,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
   }
 
   const timeOff = db.prepare("SELECT * FROM time_off WHERE date LIKE ? || '%'").all(month) as {
-    employee_id: number; date: string; off_type: string;
+    employee_id: number; date: string; off_type: string; start_time: string | null; end_time: string | null;
   }[];
   const timeOffSet = new Set(timeOff.filter(t => t.off_type === 'full').map(t => `${t.employee_id}-${t.date}`));
+  // Partial PTO lookup: "empId-date" → true for employees working a partial day
+  const partialPTOSet = new Set(timeOff.filter(t => t.off_type === 'custom').map(t => `${t.employee_id}-${t.date}`));
 
   const stations = db.prepare('SELECT * FROM stations WHERE is_active = 1 ORDER BY id').all() as Station[];
   const empStationRows = db.prepare(`
@@ -1978,6 +1980,63 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         // Run gap-fill last — after everyone is placed, reshuffle to fix remaining understaffing
         gapFill(pool, locked, stationMap, shiftName);
 
+        // ── Partial PTO coverage: stations with a partial-day employee need a second person ──
+        // If someone at a station has partial PTO, try to place an additional qualified
+        // employee there so the station is covered for the full shift.
+        {
+          const date = group[0].date;
+          for (const station of realStations) {
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const hasPartialPTO = stationAssignees.some(([eid]) => partialPTOSet.has(`${eid}-${date}`));
+            if (!hasPartialPTO) continue;
+
+            // This station needs an extra person — try unassigned employees first
+            let filled = false;
+            for (const a of pool) {
+              if (stationMap.has(a.employee_id)) continue;
+              if (!(empStationMap.get(a.employee_id) ?? []).includes(station.id)) continue;
+              if (!canPlaceAtStation(a.employee_id, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+              _origSet(a.employee_id, station.id);
+              filled = true;
+              break;
+            }
+            if (filled) continue;
+
+            // Try pulling from an overstaffed station (station with more than its min)
+            for (const otherStation of realStations) {
+              if (otherStation.id === station.id) continue;
+              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
+              const otherMin = getMinStaff(otherStation, shiftName);
+              if (otherAssignees.length <= otherMin) continue; // not overstaffed
+
+              for (const [eid] of otherAssignees) {
+                if (!(empStationMap.get(eid) ?? []).includes(station.id)) continue;
+                if (!canPlaceAtStation(eid, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+                stationMap.delete(eid);
+                _origSet(eid, station.id);
+                filled = true;
+                break;
+              }
+              if (filled) break;
+            }
+            if (filled) continue;
+
+            // Try pulling an admin from Admin station
+            if (adminStation) {
+              const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
+              for (const [eid] of adminAssignees) {
+                if (empRoleMap.get(eid) !== 'admin') continue;
+                if (!(empStationMap.get(eid) ?? []).includes(station.id)) continue;
+                if (!canPlaceAtStation(eid, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+                stationMap.delete(eid);
+                _origSet(eid, station.id);
+                filled = true;
+                break;
+              }
+            }
+          }
+        }
+
         // ── Repair pass: validate and fix by swapping ──
         // Runs iteratively until no more improvements can be made
         for (let repairIter = 0; repairIter < 10; repairIter++) {
@@ -2490,6 +2549,24 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         if (qualifiedIds.length <= 1 && qualifiedIds.length > 0) {
           const name = employees.find(e => e.id === qualifiedIds[0])?.name;
           passWarnings.push(`CRITICAL: ${name} is the ONLY person qualified for ${station.name} — no backup`);
+        }
+      }
+
+      // Partial PTO coverage warnings — flag stations where the only person has partial PTO
+      // and nobody else was assigned to cover the rest of the shift
+      for (const [, group] of shiftDateGroups) {
+        const date = group[0].date;
+        const shiftLabel = shifts.find(s => s.id === group[0].shift_id)?.name ?? 'Unknown';
+        for (const station of realStations) {
+          const stationAssignees = group.filter(a => a.station_id === station.id);
+          if (stationAssignees.length === 0) continue;
+          const partialEmps = stationAssignees.filter(a => partialPTOSet.has(`${a.employee_id}-${date}`));
+          if (partialEmps.length === 0) continue;
+          const fullCoverageEmps = stationAssignees.filter(a => !partialPTOSet.has(`${a.employee_id}-${date}`));
+          if (fullCoverageEmps.length === 0) {
+            const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
+            passWarnings.push(`PIVOTAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO but no one else covers the rest of the shift`);
+          }
         }
       }
 
