@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { useUpdateEmployee, useSaveConstraints, useEmployees } from '../../hooks/useEmployees';
 import { useStations, useSaveEmployeeStations } from '../../hooks/useStations';
@@ -818,6 +818,86 @@ function redistribute(current: Map<number, number>, changedId: number, newValue:
   return out;
 }
 
+/** Individual percentage slider — owns its value during drag to prevent parent re-renders. */
+const PercentSlider = React.memo(function PercentSlider({
+  stationId,
+  stationName,
+  color,
+  abbr,
+  pct,
+  disabled,
+  onCommit,
+}: {
+  stationId: number;
+  stationName: string;
+  color: string;
+  abbr: string | undefined;
+  pct: number;
+  disabled: boolean;
+  onCommit: (id: number, value: number) => void;
+}) {
+  const [localValue, setLocalValue] = useState(pct);
+  const dragging = useRef(false);
+
+  // Sync from parent when not actively dragging
+  const prevPct = useRef(pct);
+  if (pct !== prevPct.current && !dragging.current) {
+    prevPct.current = pct;
+    setLocalValue(pct);
+  }
+
+  const display = dragging.current ? localValue : pct;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          {abbr && (
+            <span
+              className="w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center text-white"
+              style={{ backgroundColor: color }}
+            >
+              {abbr}
+            </span>
+          )}
+          <span className="text-sm font-medium text-gray-800">{stationName}</span>
+        </div>
+        <span className="text-base font-bold text-gray-800 tabular-nums w-[48px] text-right">{display}%</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={display}
+        onPointerDown={() => { dragging.current = true; }}
+        onPointerUp={() => {
+          dragging.current = false;
+          onCommit(stationId, localValue);
+        }}
+        onLostPointerCapture={() => {
+          if (dragging.current) {
+            dragging.current = false;
+            onCommit(stationId, localValue);
+          }
+        }}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          setLocalValue(v);
+          if (!dragging.current) {
+            onCommit(stationId, v);
+          }
+        }}
+        className="station-slider"
+        style={{
+          '--track-color': color,
+          '--fill-pct': `${display}%`,
+        } as React.CSSProperties}
+        disabled={disabled}
+      />
+    </div>
+  );
+});
+
 function StationsTab({ employee, onClose }: { employee: Employee; onClose: () => void }) {
   const { data: allStations = [] } = useStations();
   const saveMutation = useSaveEmployeeStations();
@@ -839,18 +919,16 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
       next.delete(id);
       setPercents(normalizeToPercents(next));
     } else {
-      // Add new station: take share from existing stations proportionally.
-      // Start new station at an equal share of 100 / (count + 1).
       const newCount = next.size + 1;
       const newShare = Math.round(100 / newCount);
-      next.set(id, 0); // placeholder so redistribute sees it
+      next.set(id, 0);
       setPercents(redistribute(next, id, newShare));
     }
   };
 
-  const setPercent = (id: number, value: number) => {
-    setPercents(redistribute(percents, id, value));
-  };
+  const commitPercent = useCallback((id: number, value: number) => {
+    setPercents(prev => redistribute(prev, id, value));
+  }, []);
 
   const handleSave = () => {
     const payload = [...percents.entries()].map(([station_id, weight]) => ({ station_id, weight }));
@@ -863,16 +941,7 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
     );
   };
 
-  // Sort selected stations by percent descending for display
-  const selectedOrdered = useMemo(() => {
-    return [...percents.entries()]
-      .map(([id, pct]) => {
-        const station = allStations.find(s => s.id === id);
-        return station ? { station, pct } : null;
-      })
-      .filter((x): x is { station: typeof allStations[0]; pct: number } => x !== null)
-      .sort((a, b) => b.pct - a.pct);
-  }, [percents, allStations]);
+  const selectedCount = allStations.filter(s => percents.has(s.id)).length;
 
   return (
     <div className="space-y-4">
@@ -906,42 +975,29 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
         )}
       </div>
 
-      {/* Percentage sliders for selected stations */}
-      {selectedOrdered.length > 0 && (
+      {/* Percentage sliders — order follows allStations (DB order), never reorders */}
+      {selectedCount > 0 && (
         <div>
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Station Mix (must total 100%)</span>
           <div className="space-y-2">
-            {selectedOrdered.map(({ station, pct }) => {
-              const style = stationStyleMap[station.name];
-              return (
-                <div key={station.id} className="bg-white rounded-lg border border-gray-200 px-4 py-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {style && (
-                        <span
-                          className="w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center text-white"
-                          style={{ backgroundColor: style.color }}
-                        >
-                          {style.abbr}
-                        </span>
-                      )}
-                      <span className="text-sm font-medium text-gray-800">{station.name}</span>
-                    </div>
-                    <span className="text-base font-bold text-gray-800 tabular-nums">{pct}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={pct}
-                    onChange={(e) => setPercent(station.id, Number(e.target.value))}
-                    className="w-full"
-                    style={style ? { accentColor: style.color } : { accentColor: '#16a34a' }}
-                    disabled={selectedOrdered.length < 2}
+            {allStations
+              .filter(s => percents.has(s.id))
+              .map((station) => {
+                const style = stationStyleMap[station.name];
+                const color = style?.color ?? '#16a34a';
+                return (
+                  <PercentSlider
+                    key={station.id}
+                    stationId={station.id}
+                    stationName={station.name}
+                    color={color}
+                    abbr={style?.abbr}
+                    pct={percents.get(station.id) ?? 0}
+                    disabled={selectedCount < 2}
+                    onCommit={commitPercent}
                   />
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
         </div>
       )}
