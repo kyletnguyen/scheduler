@@ -9,7 +9,7 @@
     "server"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev": "\"npm run dev -w server\" \"npm run dev -w client\"",
     "build": "npm run build -w client && npm run build -w server",
     "build:copy-migrations": "node -e \"const fs=require('fs'),p='server/dist/db/migrations';if(fs.existsSync(p))fs.rmSync(p,{recursive:true});fs.cpSync('server/src/db/migrations',p,{recursive:true})\"",
     "build:all": "npm run build && npm run build:copy-migrations",

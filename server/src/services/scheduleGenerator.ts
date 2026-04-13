@@ -1132,40 +1132,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       }
     }
 
-    // Rotation penalty
-    let rotationPenalty = 0;
-    const empWeekStation = new Map<string, Map<string, number>>();
-    for (const a of assignments) {
-      if (a.station_id === null || (adminStn && a.station_id === adminStn.id)) continue;
-      const ws = (() => { const d = new Date(a.date + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
-      const key = `${a.employee_id}-${a.shift_id}`;
-      if (!empWeekStation.has(key)) empWeekStation.set(key, new Map());
-      empWeekStation.get(key)!.set(ws, a.station_id);
-    }
-    for (const [empKey, weekMap] of empWeekStation) {
-      const empId = parseInt(empKey.split('-')[0]);
-      const realQual = (empStationMap.get(empId) ?? []).filter(sid => !adminStn || sid !== adminStn.id);
-      if (realQual.length <= 1) continue;
-      // Skip rotation penalty for employees with a strong weighted preference —
-      // they're *supposed* to concentrate at their preferred station, not rotate.
-      const empWeights = realQual.map(sid => empStationWeight.get(`${empId}-${sid}`) ?? 50);
-      const totalEmpW = empWeights.reduce((s, w) => s + w, 0) || 1;
-      const maxFrac = Math.max(...empWeights) / totalEmpW;
-      const flatShare = 1 / realQual.length;
-      if (maxFrac > flatShare + 0.01) continue; // has a preference — don't penalize concentration
-      const weeks = [...weekMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-      for (let i = 1; i < weeks.length; i++) {
-        if (weeks[i][1] === weeks[i - 1][1]) rotationPenalty += 2;
-      }
-      const uniqueStations = new Set(weeks.map(w => w[1])).size;
-      if (realQual.length >= 3 && weeks.length >= 3 && uniqueStations <= 2) rotationPenalty += 3;
-    }
-
     return {
       criticals,
       pivotals,
-      rotationPenalty,
-      total: criticals * 10000 + pivotals * 100 + rotationPenalty,
+      rotationPenalty: 0,
+      total: criticals * 10000 + pivotals * 100,
     };
   };
 
@@ -1190,50 +1161,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     const getBenchQuals = (empId: number) =>
       (empStationMap.get(empId) ?? []).filter(sid => !adminStation || sid !== adminStation.id);
 
-    // Seed rotation history from previous month's DB data
-    const seedHistory = new Map<string, number>(); // "empId-stationId" -> count
-    const [yearNum, monNum] = month.split('-').map(Number);
-    const prevMonth = monNum === 1
-      ? `${yearNum - 1}-12`
-      : `${yearNum}-${String(monNum - 1).padStart(2, '0')}`;
-    const prevAssigns = db.prepare(`
-      SELECT sa.employee_id, sa.station_id, sa.date
-      FROM schedule_assignments sa
-      WHERE sa.date LIKE ? || '%' AND sa.station_id IS NOT NULL
-      ORDER BY sa.date
-    `).all(prevMonth) as { employee_id: number; station_id: number; date: string }[];
-
-    const getWeekStart = (dateStr: string) => {
-      const d = new Date(dateStr + 'T12:00:00');
-      d.setDate(d.getDate() - d.getDay());
-      return d.toISOString().slice(0, 10);
-    };
-
-    const prevWeekStations = new Map<string, number>();
-    for (const pa of prevAssigns) {
-      const ws = getWeekStart(pa.date);
-      prevWeekStations.set(`${pa.employee_id}-${ws}-${pa.station_id}`, 1);
-    }
-    for (const [key] of prevWeekStations) {
-      const parts = key.split('-');
-      const empId = parts[0];
-      const stationId = parts[parts.length - 1];
-      const hk = `${empId}-${stationId}`;
-      seedHistory.set(hk, (seedHistory.get(hk) ?? 0) + 1);
-    }
-
-    // Seed last-week station tracking
-    const seedLastWeekStation = new Map<number, number>(); // empId -> stationId
-    if (prevAssigns.length > 0) {
-      const lastPrevDate = prevAssigns[prevAssigns.length - 1].date;
-      const lastPrevWeek = getWeekStart(lastPrevDate);
-      for (const pa of prevAssigns) {
-        if (getWeekStart(pa.date) === lastPrevWeek && pa.station_id) {
-          seedLastWeekStation.set(pa.employee_id, pa.station_id);
-        }
-      }
-    }
-
     // Group assignments by shift+date
     const shiftDateGroups = new Map<string, Assignment[]>();
     for (const a of result) {
@@ -1254,12 +1181,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
     // LAYER FUNCTIONS — each processes one day+shift group
     // ══════════════════════════════════════════════════════════════
 
-    // ── Layer 1: Blood Bank — assign exactly 1 CLS, rotate fairly ──
+    // ── Layer 1: Blood Bank — assign exactly 1 CLS, prefer highest BB weight ──
     function layer1_bloodBank(
       pool: Assignment[],
       locked: Set<number>,
       stationMap: Map<number, number>,
-      bbRotation: Map<number, number>,
       passIdx: number,
     ) {
       if (!bloodBankStation) return;
@@ -1273,22 +1199,17 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       );
       if (bbQualified.length === 0) return;
 
-      // Sort by weighted BB share: employees with low BB preference are pushed back
-      // so they're picked for BB less often than employees with high BB preference.
-      // Vannie (BB weight 10, Micro weight 70) should rarely end up here; Randy (flat 50)
-      // should do a normal share. Without weighting, Vannie gets pulled to BB equally and
-      // locked out of her preferred Micro station in Layer 4.
-      const bbShare = (empId: number) => {
-        const w = empStationWeight.get(`${empId}-${bloodBankStation.id}`) ?? 50;
-        const count = bbRotation.get(empId) ?? 0;
-        // (count + 1) / weight: lower = further below their fair share. Adding 1 breaks
-        // the day-1 zero tie in favor of higher-weighted employees.
-        return (count + 1) / Math.max(w, 1);
+      // Sort by BB weight fraction descending — employees with a high BB preference
+      // share get picked first. This directly reflects slider weights without
+      // historical rotation counters.
+      const bbWeightFrac = (empId: number) => {
+        const quals = getBenchQuals(empId);
+        const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
+        return getWeight(empId, bloodBankStation.id) / totalW;
       };
       const sorted = [...bbQualified].sort((a, b) => {
-        const aShare = bbShare(a.employee_id);
-        const bShare = bbShare(b.employee_id);
-        if (Math.abs(aShare - bShare) > 0.0001) return aShare - bShare;
+        const diff = bbWeightFrac(b.employee_id) - bbWeightFrac(a.employee_id);
+        if (Math.abs(diff) > 0.0001) return diff;
         // On pass 0 use stable order; on later passes, randomize ties
         return passIdx === 0 ? a.employee_id - b.employee_id : Math.random() - 0.5;
       });
@@ -1296,7 +1217,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const chosen = sorted[0];
       stationMap.set(chosen.employee_id, bloodBankStation.id);
       locked.add(chosen.employee_id);
-      bbRotation.set(chosen.employee_id, (bbRotation.get(chosen.employee_id) ?? 0) + 1);
     }
 
     // ── Layer 2: MLT Placement — exactly 1 MLT per require_cls station ──
@@ -1304,8 +1224,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       pool: Assignment[],
       locked: Set<number>,
       stationMap: Map<number, number>,
-      mltHistory: Map<string, number>,
-      lastWeekMLT: Map<number, number>,
       passIdx: number,
       shiftName: string,
     ) {
@@ -1348,21 +1266,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const tryAssign = (stIdx: number, assignment: Map<number, number>, used: Set<number>) => {
         if (stIdx >= remainingStations.length) {
           let score = 0;
+          // Score based on direct weight: reward placing MLTs at their preferred stations
           for (const [empId, stationId] of assignment) {
             const quals = getBenchQuals(empId).filter(sid =>
               mltStations.some(s => s.id === sid)
             );
-            const hist = mltHistory.get(`${empId}-${stationId}`) ?? 0;
-            // Proportional history targeting (mirrors Layer 4 CLS scoring)
             const w = getWeight(empId, stationId);
-            const totalHist = quals.reduce((sum, q) => sum + (mltHistory.get(`${empId}-${q}`) ?? 0), 0);
             const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
             const weightFrac = w / totalW;
-            const targetHist = (totalHist + 1) * weightFrac;
-            const deficit = targetHist - hist;
-            score -= deficit * 900;
-            // Waive same-as-last-week penalty for very strong preferences (≥80% share)
-            if (lastWeekMLT.get(empId) === stationId && weightFrac < 0.8) score += 10000;
+            score -= weightFrac * 900;
           }
           // Penalize unfilled stations
           score += (remainingStations.length - assignment.size) * 1000;
@@ -1401,7 +1313,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       for (const [empId, stationId] of bestAssignment) {
         stationMap.set(empId, stationId);
         locked.add(empId);
-        mltHistory.set(`${empId}-${stationId}`, (mltHistory.get(`${empId}-${stationId}`) ?? 0) + 1);
       }
     }
 
@@ -1458,14 +1369,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       for (const a of adminEmps) locked.add(a.employee_id);
     }
 
-    // ── Layer 4: CLS Rotation — fill bench with CLS, optimize diversity ──
+    // ── Layer 4: CLS Station Assignment — fill bench with CLS, weight-driven ──
     function layer4_clsRotation(
       pool: Assignment[],
       locked: Set<number>,
       stationMap: Map<number, number>,
-      rotHistory: Map<string, number>,
-      lastWeekStation: Map<number, number>,
-      weekStationThisWeek: Map<number, number>,
       shiftName: string,
       passIdx: number,
       overflowBalance: Map<number, number>,
@@ -1478,12 +1386,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       );
       const uniqueCLSIds = [...new Set(clsEmps.map(a => a.employee_id))];
 
-      // Sort: single-station employees always first, then most-constrained or shuffled
-      // This ensures employees like Julie (Micro-only) always get their slot before multi-station CLS.
+      // Sort: single-station employees always first, then most-constrained or shuffled.
       // Within multi-station: order by *preference strength* descending, so employees
-      // with a strong weighted preference (e.g. Vannie 70% Micro) claim their preferred
-      // station BEFORE flat-preference employees fill it up. Without this, greedy
-      // iteration gives the scarce slot to whoever happens to be scored first.
+      // with a strong weighted preference claim their preferred station BEFORE
+      // flat-preference employees fill it up.
       const prefStrength = (id: number): number => {
         const qs = getBenchQuals(id);
         if (qs.length <= 1) return 1;
@@ -1523,6 +1429,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         let bestStation = -1;
         let bestStationScore = Infinity;
 
+        const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
+
         for (const sid of quals) {
           const station = realStations.find(s => s.id === sid);
           if (!station) continue;
@@ -1544,40 +1452,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           let score = 0;
 
-          // Proportional history targeting: pull placement toward the employee's
-          // weight ratios. For each qualified station, compute the target share of
-          // days-so-far (weight / sum of weights) vs actual history share, and
-          // strongly reward the station with the biggest deficit. When weights are
-          // flat this degenerates to "prefer the least-visited station" = equal rotation.
-          const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
-          const w = getWeight(empId, sid);
-          const totalHist = quals.reduce((sum, q) => sum + (rotHistory.get(`${empId}-${q}`) ?? 0), 0);
-          const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
-          const weightFrac = w / totalW;
-          // Use (totalHist + 1) so the first placement of the month still matters.
-          const targetHist = (totalHist + 1) * weightFrac;
-          const deficit = targetHist - hist;
-          // Deficit dominates: coefficient is deliberately large so preference
-          // ratios drive placement above all other soft factors.
-          score -= deficit * 5000;
+          // Direct weight scoring: higher weight fraction = lower score = preferred.
+          // This directly maps slider preferences to placement without historical
+          // tracking. Employee with Micro=70, Hema=30 will always prefer Micro.
+          const weightFrac = getWeight(empId, sid) / totalW;
+          score -= weightFrac * 5000;
 
-          // Light tiebreaker for stations that still need bodies (hard block above
-          // already prevents overfill — this only breaks ties between equally-
-          // deficient stations in favor of the one with more open slots).
+          // Light tiebreaker for stations that still need bodies
           score -= 50 * (minNeeded - current);
-
-          // Consecutive penalty: same station as last week.
-          // Waived when this station is the employee's *top* preference and above
-          // the flat baseline (1/n share). Vannie at 70% Micro should be parked in
-          // Micro week after week — the penalty only applies to flat-preference
-          // employees who should rotate.
-          const maxWForEmp = Math.max(...quals.map(q => getWeight(empId, q)));
-          const flatShare = 1 / quals.length;
-          const isTopPreferred = w === maxWForEmp && weightFrac > flatShare + 0.01;
-          if (lastWeekStation.get(empId) === sid && !isTopPreferred) score += 1500;
-
-          // Weekly consistency: bonus if same station earlier this week
-          if (weekStationThisWeek.get(empId) === sid) score -= 300;
 
           // Scarcity: stations with fewer qualified staff get a boost
           const qualifiedCount = employees.filter(e =>
@@ -1595,7 +1477,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           stationMap.set(empId, bestStation);
           locked.add(empId);
           stationCount.set(bestStation, (stationCount.get(bestStation) ?? 0) + 1);
-          rotHistory.set(`${empId}-${bestStation}`, (rotHistory.get(`${empId}-${bestStation}`) ?? 0) + 1);
           // Track overflow CLS at Chem/Hema for monthly balance
           const bStation = realStations.find(s => s.id === bestStation);
           if (bStation && isOverflowStation(bStation)) {
@@ -1604,21 +1485,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               overflowBalance.set(bestStation, (overflowBalance.get(bestStation) ?? 0) + 1);
             }
           }
-          weekStationThisWeek.set(empId, bestStation);
         }
       }
 
-      // Swap improvement pass: try swapping pairs to reduce total proportional deficit.
-      // Deficit = |actualHist - targetHist| for each (emp, station); swap if it
-      // brings both employees closer to their weighted targets.
-      const deficitFor = (empId: number, sid: number): number => {
+      // Swap improvement pass: try swapping pairs to improve weight alignment.
+      // Swap if it places both employees closer to their highest-weighted station.
+      const weightScore = (empId: number, sid: number): number => {
         const quals = getBenchQuals(empId);
-        const w = getWeight(empId, sid);
-        const totalHist = quals.reduce((sum, q) => sum + (rotHistory.get(`${empId}-${q}`) ?? 0), 0);
         const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
-        const target = (totalHist + 1) * (w / totalW);
-        const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
-        return Math.abs(target - hist);
+        return getWeight(empId, sid) / totalW;
       };
       for (const empA of orderedCLS) {
         if (!stationMap.has(empA)) continue;
@@ -1633,20 +1508,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           if (!getBenchQuals(empA).includes(stB)) continue;
           if (!getBenchQuals(empB).includes(stA)) continue;
 
-          const scoreBefore = deficitFor(empA, stA) + deficitFor(empB, stB);
-          const scoreAfter = deficitFor(empA, stB) + deficitFor(empB, stA);
+          const scoreBefore = weightScore(empA, stA) + weightScore(empB, stB);
+          const scoreAfter = weightScore(empA, stB) + weightScore(empB, stA);
 
-          if (scoreAfter < scoreBefore) {
-            // Undo old history
-            rotHistory.set(`${empA}-${stA}`, Math.max(0, (rotHistory.get(`${empA}-${stA}`) ?? 1) - 1));
-            rotHistory.set(`${empB}-${stB}`, Math.max(0, (rotHistory.get(`${empB}-${stB}`) ?? 1) - 1));
-            // Apply swap
+          if (scoreAfter > scoreBefore) {
+            // Swap improves total weight alignment
             stationMap.set(empA, stB);
             stationMap.set(empB, stA);
-            rotHistory.set(`${empA}-${stB}`, (rotHistory.get(`${empA}-${stB}`) ?? 0) + 1);
-            rotHistory.set(`${empB}-${stA}`, (rotHistory.get(`${empB}-${stA}`) ?? 0) + 1);
-            weekStationThisWeek.set(empA, stB);
-            weekStationThisWeek.set(empB, stA);
             break; // one swap per employee
           }
         }
@@ -2063,41 +1931,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       // Reset all station assignments for this pass
       for (const a of result) a.station_id = null as any;
 
-      // Per-pass rotation tracking (starts from seed)
-      const rotHistory = new Map(seedHistory);
-      const mltHistory = new Map(seedHistory);
-      const lastWeekStation = new Map(seedLastWeekStation);
-      const lastWeekMLT = new Map<number, number>();
-      for (const [empId, v] of seedLastWeekStation) {
-        if (empRoleMap.get(empId) === 'mlt') lastWeekMLT.set(empId, v);
-      }
-      const weekStationThisWeek = new Map<number, number>();
-      const bbRotation = new Map<number, number>();
       // Track overflow CLS at Chem/Hema for monthly balance
       const overflowBalance = new Map<number, number>();
 
-      // Process each day+shift group chronologically
-      let currentWeek = '';
-
       for (const groupKey of sortedGroupKeys) {
         const group = shiftDateGroups.get(groupKey)!;
-        const date = group[0].date;
         const shiftIdNum = group[0].shift_id;
         const shiftName = shifts.find(s => s.id === shiftIdNum)?.name?.toLowerCase() ?? '';
-
-        // Track week transitions for rotation tracking
-        const week = getWeekStart(date);
-        if (week !== currentWeek) {
-          // New week — update lastWeekStation from this week's assignments
-          if (currentWeek !== '') {
-            for (const [empId, sid] of weekStationThisWeek) {
-              lastWeekStation.set(empId, sid);
-              if (empRoleMap.get(empId) === 'mlt') lastWeekMLT.set(empId, sid);
-            }
-          }
-          weekStationThisWeek.clear();
-          currentWeek = week;
-        }
 
         // Build the pool: all employees working this day+shift
         const pool = group;
@@ -2128,10 +1968,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         };
 
         // Run the 7 layers in order
-        layer1_bloodBank(pool, locked, stationMap, bbRotation, passIdx);
-        layer2_mltPlacement(pool, locked, stationMap, mltHistory, lastWeekMLT, passIdx, shiftName);
+        layer1_bloodBank(pool, locked, stationMap, passIdx);
+        layer2_mltPlacement(pool, locked, stationMap, passIdx, shiftName);
         layer3_adminPlacement(pool, locked, stationMap, shiftName);
-        layer4_clsRotation(pool, locked, stationMap, rotHistory, lastWeekStation, weekStationThisWeek, shiftName, passIdx, overflowBalance);
+        layer4_clsRotation(pool, locked, stationMap, shiftName, passIdx, overflowBalance);
         layer5_shaynaFill(pool, locked, stationMap, shiftName);
         layer6_perDiemFill(pool, locked, stationMap, shiftName);
         layer7_overflow(pool, locked, stationMap, shiftName, overflowBalance);

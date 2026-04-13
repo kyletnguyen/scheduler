@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useStations, useSaveEmployeeStations } from '../../hooks/useStations';
 import type { Employee } from '../../types';
 import { buildStationStyleMap } from '../../utils/stationStyles';
@@ -78,7 +78,7 @@ export default function StationsEditor({ employee, onClose }: Props) {
 
         <p className="text-xs text-gray-500 mb-3">
           Click a station to add it, then drag the slider to set preference strength (0 = last resort, 100 = strongly preferred).
-          The scheduler balances staffing first, then biases placement toward higher-weighted stations.
+          The scheduler assigns stations based on these weights — higher weight means more days at that station.
         </p>
 
         {/* Station toggle pills */}
@@ -108,28 +108,35 @@ export default function StationsEditor({ employee, onClose }: Props) {
 
         {/* Sliders for selected stations */}
         {selectedOrdered.length > 0 && (
-          <div className="space-y-2 mb-3">
+          <div className="space-y-1.5 mb-3">
             {selectedOrdered.map(({ station, weight }) => {
               const style = stationStyleMap[station.name];
               const share = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+              const color = style?.color ?? '#16a34a';
               return (
-                <div key={station.id} className="bg-white rounded border border-gray-200 px-3 py-2">
-                  <div className="flex items-center justify-between mb-1">
+                <div key={station.id} className="bg-white rounded-lg border border-gray-200 px-3 py-2">
+                  <div className="flex items-center justify-between mb-1.5">
                     <div className="flex items-center gap-2">
                       {style && (
                         <span
-                          className="w-6 h-4 rounded text-[9px] font-bold flex items-center justify-center text-white"
-                          style={{ backgroundColor: style.color }}
+                          className="w-6 h-4 rounded text-[9px] font-bold flex items-center justify-center text-white shrink-0"
+                          style={{ backgroundColor: color }}
                         >
                           {style.abbr}
                         </span>
                       )}
                       <span className="text-xs font-medium text-gray-800">{station.name}</span>
                     </div>
-                    <div className="flex items-center gap-2 text-[10px]">
-                      <span className="text-gray-500">weight: <span className="font-semibold text-gray-800">{weight}</span></span>
-                      <span className="text-gray-400">·</span>
-                      <span className="text-gray-500">share: <span className="font-semibold text-gray-800">{share}%</span></span>
+                    <div className="flex items-center gap-3 text-[10px] tabular-nums">
+                      <span className="text-gray-500">
+                        wt <span className="font-semibold text-gray-800">{weight}</span>
+                      </span>
+                      <span
+                        className="font-semibold px-1.5 py-0.5 rounded text-white min-w-[36px] text-center"
+                        style={{ backgroundColor: color }}
+                      >
+                        {share}%
+                      </span>
                     </div>
                   </div>
                   <input
@@ -138,8 +145,11 @@ export default function StationsEditor({ employee, onClose }: Props) {
                     max={100}
                     value={weight}
                     onChange={(e) => setWeight(station.id, Number(e.target.value))}
-                    className="w-full accent-green-600"
-                    style={style ? { accentColor: style.color } : undefined}
+                    className="station-slider"
+                    style={{
+                      '--track-color': color,
+                      '--fill-pct': `${weight}%`,
+                    } as React.CSSProperties}
                   />
                 </div>
               );
