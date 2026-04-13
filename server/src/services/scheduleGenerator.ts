@@ -1981,37 +1981,46 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         gapFill(pool, locked, stationMap, shiftName);
 
         // ── Partial PTO coverage: stations with a partial-day employee need a second person ──
-        // If someone at a station has partial PTO, try to place an additional qualified
+        // If someone at a station has partial PTO, place an additional qualified
         // employee there so the station is covered for the full shift.
+        // Uses _origSet to bypass max-staff caps — this is an explicit override
+        // because the partial-PTO employee is only there for part of the shift.
         {
           const date = group[0].date;
           for (const station of realStations) {
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
-            const hasPartialPTO = stationAssignees.some(([eid]) => partialPTOSet.has(`${eid}-${date}`));
-            if (!hasPartialPTO) continue;
+            const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
+            if (partialEmps.length === 0) continue;
+            // Check if there's already a full-day person covering this station
+            const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
+            if (fullDayCovers.length > 0) continue; // already covered
 
-            // This station needs an extra person — try unassigned employees first
+            // Need a backup — bypass normal caps via _origSet since this is a
+            // partial-day override (two people share the station across the shift).
+            const isQualified = (eid: number) =>
+              (empStationMap.get(eid) ?? []).includes(station.id);
+
             let filled = false;
+
+            // Strategy 1: unassigned employee qualified for this station
             for (const a of pool) {
               if (stationMap.has(a.employee_id)) continue;
-              if (!(empStationMap.get(a.employee_id) ?? []).includes(station.id)) continue;
-              if (!canPlaceAtStation(a.employee_id, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+              if (!isQualified(a.employee_id)) continue;
               _origSet(a.employee_id, station.id);
               filled = true;
               break;
             }
             if (filled) continue;
 
-            // Try pulling from an overstaffed station (station with more than its min)
+            // Strategy 2: pull from an overstaffed station
             for (const otherStation of realStations) {
               if (otherStation.id === station.id) continue;
               const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
               const otherMin = getMinStaff(otherStation, shiftName);
-              if (otherAssignees.length <= otherMin) continue; // not overstaffed
+              if (otherAssignees.length <= otherMin) continue;
 
               for (const [eid] of otherAssignees) {
-                if (!(empStationMap.get(eid) ?? []).includes(station.id)) continue;
-                if (!canPlaceAtStation(eid, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+                if (!isQualified(eid)) continue;
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
                 filled = true;
@@ -2021,13 +2030,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             if (filled) continue;
 
-            // Try pulling an admin from Admin station
+            // Strategy 3: pull an admin/supervisor from Admin station
             if (adminStation) {
               const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
               for (const [eid] of adminAssignees) {
-                if (empRoleMap.get(eid) !== 'admin') continue;
-                if (!(empStationMap.get(eid) ?? []).includes(station.id)) continue;
-                if (!canPlaceAtStation(eid, station.id, stationMap as any, empRoleMap, shiftName)) continue;
+                if (!isQualified(eid)) continue;
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
                 filled = true;

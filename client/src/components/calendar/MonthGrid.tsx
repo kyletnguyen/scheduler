@@ -1440,12 +1440,18 @@ export default function MonthGrid() {
                                   const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
                                     : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
                                     : 'bg-blue-100 text-blue-700';
+                                  const isPartialPTO = timeOffIndex.get(a.employee_id)?.get(date) === 'custom';
                                   return (
                                     <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
                                       <span className="font-medium text-gray-800">{a.employee_name}</span>
                                       <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
                                         {empInfo?.role ?? '?'}
                                       </span>
+                                      {isPartialPTO && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded-sm font-bold bg-red-100 text-red-700 border border-red-200">
+                                          1/2 DAY
+                                        </span>
+                                      )}
                                     </div>
                                   );
                                 })}
