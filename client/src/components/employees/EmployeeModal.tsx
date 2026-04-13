@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { useUpdateEmployee, useSaveConstraints, useEmployees } from '../../hooks/useEmployees';
 import { useStations, useSaveEmployeeStations } from '../../hooks/useStations';
 import { useTimeOff, useCreateTimeOff, useDeleteTimeOff, useClearTimeOff } from '../../hooks/useTimeOff';
 import { usePTOImpact } from '../../hooks/useSchedule';
 import type { Employee, DefaultShift } from '../../types';
+import { buildStationStyleMap } from '../../utils/stationStyles';
 import toast from 'react-hot-toast';
 
 interface Props {
@@ -742,52 +743,119 @@ function RulesTab({ employee, onClose }: { employee: Employee; onClose: () => vo
 
 // ─── Stations Tab ───
 
+// Normalize raw weights so they sum to exactly 100 (rounded ints).
+function normalizeToPercents(raw: Map<number, number>): Map<number, number> {
+  if (raw.size === 0) return new Map();
+  const total = [...raw.values()].reduce((a, b) => a + b, 0);
+  if (total === 0) {
+    // All zero — split evenly
+    const each = Math.floor(100 / raw.size);
+    const remainder = 100 - each * raw.size;
+    const out = new Map<number, number>();
+    let i = 0;
+    for (const k of raw.keys()) {
+      out.set(k, each + (i < remainder ? 1 : 0));
+      i++;
+    }
+    return out;
+  }
+  // Scale proportionally, then distribute rounding error
+  const scaled: { id: number; exact: number; floor: number }[] = [];
+  for (const [id, w] of raw) {
+    const exact = (w / total) * 100;
+    scaled.push({ id, exact, floor: Math.floor(exact) });
+  }
+  const floorSum = scaled.reduce((a, b) => a + b.floor, 0);
+  let remainder = 100 - floorSum;
+  // Give leftover to the largest fractional parts
+  scaled.sort((a, b) => (b.exact - b.floor) - (a.exact - a.floor));
+  const out = new Map<number, number>();
+  for (const item of scaled) {
+    out.set(item.id, item.floor + (remainder > 0 ? 1 : 0));
+    if (remainder > 0) remainder--;
+  }
+  return out;
+}
+
+// Redistribute: user dragged `changedId` to `newValue`.
+// Keep the changed station at newValue and adjust the others proportionally so sum = 100.
+function redistribute(current: Map<number, number>, changedId: number, newValue: number): Map<number, number> {
+  const clamped = Math.max(0, Math.min(100, Math.round(newValue)));
+  if (current.size === 1) {
+    const out = new Map<number, number>();
+    out.set(changedId, 100);
+    return out;
+  }
+  const others = [...current.entries()].filter(([id]) => id !== changedId);
+  const remaining = 100 - clamped;
+  const othersTotal = others.reduce((a, [, v]) => a + v, 0);
+
+  const out = new Map<number, number>();
+  out.set(changedId, clamped);
+
+  if (othersTotal === 0) {
+    // Split remaining evenly among the others
+    const each = Math.floor(remaining / others.length);
+    let leftover = remaining - each * others.length;
+    for (const [id] of others) {
+      out.set(id, each + (leftover > 0 ? 1 : 0));
+      if (leftover > 0) leftover--;
+    }
+  } else {
+    // Scale others proportionally to their current values
+    const scaled: { id: number; exact: number; floor: number }[] = others.map(([id, v]) => {
+      const exact = (v / othersTotal) * remaining;
+      return { id, exact, floor: Math.floor(exact) };
+    });
+    const floorSum = scaled.reduce((a, b) => a + b.floor, 0);
+    let leftover = remaining - floorSum;
+    scaled.sort((a, b) => (b.exact - b.floor) - (a.exact - a.floor));
+    for (const item of scaled) {
+      out.set(item.id, item.floor + (leftover > 0 ? 1 : 0));
+      if (leftover > 0) leftover--;
+    }
+  }
+  return out;
+}
+
 function StationsTab({ employee, onClose }: { employee: Employee; onClose: () => void }) {
   const { data: allStations = [] } = useStations();
   const saveMutation = useSaveEmployeeStations();
 
-  const [orderedIds, setOrderedIds] = useState<number[]>(
-    employee.stations?.map((s) => s.id) ?? []
-  );
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [overIdx, setOverIdx] = useState<number | null>(null);
+  const stationStyleMap = useMemo(() => buildStationStyleMap(allStations), [allStations]);
 
-  const toggle = (id: number) => {
-    if (orderedIds.includes(id)) setOrderedIds(orderedIds.filter((sid) => sid !== id));
-    else setOrderedIds([...orderedIds, id]);
-  };
-
-  const handleDragStart = (index: number) => {
-    setDragIdx(index);
-  };
-
-  const handleDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    setOverIdx(index);
-  };
-
-  const handleDrop = (index: number) => {
-    if (dragIdx === null || dragIdx === index) {
-      setDragIdx(null);
-      setOverIdx(null);
-      return;
+  // Percentages per station_id (integers summing to 100 when any are selected).
+  const [percents, setPercents] = useState<Map<number, number>>(() => {
+    const raw = new Map<number, number>();
+    for (const s of employee.stations ?? []) {
+      raw.set(s.id, s.weight ?? 50);
     }
-    const next = [...orderedIds];
-    const [moved] = next.splice(dragIdx, 1);
-    next.splice(index, 0, moved);
-    setOrderedIds(next);
-    setDragIdx(null);
-    setOverIdx(null);
+    return normalizeToPercents(raw);
+  });
+
+  const toggleStation = (id: number) => {
+    const next = new Map(percents);
+    if (next.has(id)) {
+      next.delete(id);
+      setPercents(normalizeToPercents(next));
+    } else {
+      // Add new station: take share from existing stations proportionally.
+      // Start new station at an equal share of 100 / (count + 1).
+      const newCount = next.size + 1;
+      const newShare = Math.round(100 / newCount);
+      next.set(id, 0); // placeholder so redistribute sees it
+      setPercents(redistribute(next, id, newShare));
+    }
   };
 
-  const handleDragEnd = () => {
-    setDragIdx(null);
-    setOverIdx(null);
+  const setPercent = (id: number, value: number) => {
+    setPercents(redistribute(percents, id, value));
   };
 
   const handleSave = () => {
+    const payload = [...percents.entries()].map(([station_id, weight]) => ({ station_id, weight }));
     saveMutation.mutate(
-      { employeeId: employee.id, stationIds: orderedIds },
+      { employeeId: employee.id, stations: payload },
       {
         onSuccess: () => { toast.success('Stations saved'); onClose(); },
         onError: (err) => toast.error(err.message),
@@ -795,30 +863,41 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
     );
   };
 
-  const stationMap = new Map(allStations.map((s) => [s.id, s]));
+  // Sort selected stations by percent descending for display
+  const selectedOrdered = useMemo(() => {
+    return [...percents.entries()]
+      .map(([id, pct]) => {
+        const station = allStations.find(s => s.id === id);
+        return station ? { station, pct } : null;
+      })
+      .filter((x): x is { station: typeof allStations[0]; pct: number } => x !== null)
+      .sort((a, b) => b.pct - a.pct);
+  }, [percents, allStations]);
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-500">
-        Click stations to add/remove. Drag to reorder priority — #1 is preferred.
+        Click a station to add it, then adjust the percentage to set how often this employee should work there.
+        Percentages always add up to 100% — moving one slider auto-adjusts the others.
       </p>
 
-      {/* Available stations */}
+      {/* Station toggle pills */}
       <div className="flex flex-wrap gap-2">
         {allStations.map((station) => {
-          const index = orderedIds.indexOf(station.id);
-          const isSelected = index >= 0;
+          const isSelected = percents.has(station.id);
+          const style = stationStyleMap[station.name];
           return (
-            <button key={station.id} onClick={() => toggle(station.id)}
-              className={`relative px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isSelected ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}>
-              {isSelected && (
-                <span className="absolute -top-2 -left-2 bg-green-800 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
-                  {index + 1}
-                </span>
-              )}
-              {station.name}
+            <button
+              key={station.id}
+              onClick={() => toggleStation(station.id)}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all border ${
+                isSelected
+                  ? 'text-white border-transparent shadow-sm'
+                  : 'bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200'
+              }`}
+              style={isSelected && style ? { backgroundColor: style.color } : undefined}
+            >
+              {isSelected && style ? `${style.abbr} · ` : ''}{station.name}
             </button>
           );
         })}
@@ -827,42 +906,39 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
         )}
       </div>
 
-      {/* Priority ordering — drag to reorder */}
-      {orderedIds.length > 0 && (
+      {/* Percentage sliders for selected stations */}
+      {selectedOrdered.length > 0 && (
         <div>
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Priority Order</span>
-          <div className="space-y-1">
-            {orderedIds.map((id, index) => {
-              const station = stationMap.get(id);
-              if (!station) return null;
-              const isBeingDragged = dragIdx === index;
-              const isDropTarget = overIdx === index && dragIdx !== index;
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Station Mix (must total 100%)</span>
+          <div className="space-y-2">
+            {selectedOrdered.map(({ station, pct }) => {
+              const style = stationStyleMap[station.name];
               return (
-                <div
-                  key={id}
-                  draggable
-                  onDragStart={() => handleDragStart(index)}
-                  onDragOver={(e) => handleDragOver(e, index)}
-                  onDrop={() => handleDrop(index)}
-                  onDragEnd={handleDragEnd}
-                  className={`flex items-center gap-3 rounded-lg px-3 py-2.5 border transition-all cursor-grab active:cursor-grabbing ${
-                    isBeingDragged
-                      ? 'opacity-40 border-gray-300 bg-gray-100'
-                      : isDropTarget
-                        ? 'border-green-400 bg-green-50 shadow-sm'
-                        : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                  }`}
-                >
-                  <span className="text-gray-300 text-sm cursor-grab select-none">&#x2630;</span>
-                  <span className={`text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-                    index === 0 ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-600'
-                  }`}>
-                    {index + 1}
-                  </span>
-                  <span className="text-sm text-gray-800 flex-1">
-                    {station.name}
-                    {index === 0 && <span className="text-xs text-green-600 ml-2 font-medium">Preferred</span>}
-                  </span>
+                <div key={station.id} className="bg-white rounded-lg border border-gray-200 px-4 py-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      {style && (
+                        <span
+                          className="w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center text-white"
+                          style={{ backgroundColor: style.color }}
+                        >
+                          {style.abbr}
+                        </span>
+                      )}
+                      <span className="text-sm font-medium text-gray-800">{station.name}</span>
+                    </div>
+                    <span className="text-base font-bold text-gray-800 tabular-nums">{pct}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={pct}
+                    onChange={(e) => setPercent(station.id, Number(e.target.value))}
+                    className="w-full"
+                    style={style ? { accentColor: style.color } : { accentColor: '#16a34a' }}
+                    disabled={selectedOrdered.length < 2}
+                  />
                 </div>
               );
             })}
@@ -873,7 +949,7 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
       <div className="pt-1">
         <button onClick={handleSave} disabled={saveMutation.isPending}
           className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
-          {saveMutation.isPending ? 'Saving...' : 'Save Stations'}
+          {saveMutation.isPending ? 'Saving...' : 'Save Preferences'}
         </button>
       </div>
     </div>

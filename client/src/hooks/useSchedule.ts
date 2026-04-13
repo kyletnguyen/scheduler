@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSchedule, fetchWarnings, createAssignment, deleteAssignment, generateSchedule, checkPTOImpact } from '../api/schedules';
+import { fetchSchedule, fetchWarnings, createAssignment, deleteAssignment, updateAssignment, swapAssignments, generateSchedule, checkPTOImpact } from '../api/schedules';
 import type { PTOImpact } from '../api/schedules';
 import { fetchShifts } from '../api/shifts';
 
@@ -38,6 +38,28 @@ export function useDeleteAssignment(month: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteAssignment,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['schedule', month] });
+      qc.invalidateQueries({ queryKey: ['warnings', month] });
+    },
+  });
+}
+
+export function useUpdateAssignment(month: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, station_id }: { id: number; station_id: number | null }) => updateAssignment(id, { station_id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['schedule', month] });
+      qc.invalidateQueries({ queryKey: ['warnings', month] });
+    },
+  });
+}
+
+export function useSwapAssignments(month: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ a, b }: { a: number; b: number }) => swapAssignments(a, b),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['schedule', month] });
       qc.invalidateQueries({ queryKey: ['warnings', month] });

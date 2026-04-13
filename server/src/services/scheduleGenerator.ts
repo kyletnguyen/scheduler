@@ -306,10 +306,10 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
   }[];
 
   const empStationRows = db.prepare(`
-    SELECT es.employee_id, es.station_id FROM employee_stations es
+    SELECT es.employee_id, es.station_id, es.weight FROM employee_stations es
     JOIN stations s ON es.station_id = s.id WHERE s.is_active = 1
     ORDER BY es.employee_id, es.priority
-  `).all() as { employee_id: number; station_id: number }[];
+  `).all() as { employee_id: number; station_id: number; weight: number }[];
   const empStationMap = new Map<number, number[]>();
   for (const row of empStationRows) {
     if (!empStationMap.has(row.employee_id)) empStationMap.set(row.employee_id, []);
@@ -573,17 +573,24 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
   const stations = db.prepare('SELECT * FROM stations WHERE is_active = 1 ORDER BY id').all() as Station[];
   const empStationRows = db.prepare(`
-    SELECT es.employee_id, es.station_id FROM employee_stations es
+    SELECT es.employee_id, es.station_id, es.weight FROM employee_stations es
     JOIN stations s ON es.station_id = s.id WHERE s.is_active = 1
     ORDER BY es.employee_id, es.priority
-  `).all() as { employee_id: number; station_id: number }[];
+  `).all() as { employee_id: number; station_id: number; weight: number }[];
 
   const empStationMap = new Map<number, number[]>();
+  // Preference weight per (employee, station) — 0-100. Default 50 = neutral.
+  const empStationWeight = new Map<string, number>();
   for (const row of empStationRows) {
     if (!empStationMap.has(row.employee_id)) empStationMap.set(row.employee_id, []);
     empStationMap.get(row.employee_id)!.push(row.station_id);
+    empStationWeight.set(`${row.employee_id}-${row.station_id}`, row.weight ?? 50);
   }
 
+  // Helper: get weight for a (employee, station) pair. Returns 50 if unset.
+  const getWeight = (empId: number, stationId: number): number => {
+    return empStationWeight.get(`${empId}-${stationId}`) ?? 50;
+  };
   // If an employee has no station qualifications, treat them as qualified for bench stations
   // Admin station is only for admin-role employees or those explicitly assigned to it
   const adminStationObj = stations.find(s => s.name === 'Admin');
@@ -1139,6 +1146,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const empId = parseInt(empKey.split('-')[0]);
       const realQual = (empStationMap.get(empId) ?? []).filter(sid => !adminStn || sid !== adminStn.id);
       if (realQual.length <= 1) continue;
+      // Skip rotation penalty for employees with a strong weighted preference —
+      // they're *supposed* to concentrate at their preferred station, not rotate.
+      const empWeights = realQual.map(sid => empStationWeight.get(`${empId}-${sid}`) ?? 50);
+      const totalEmpW = empWeights.reduce((s, w) => s + w, 0) || 1;
+      const maxFrac = Math.max(...empWeights) / totalEmpW;
+      const flatShare = 1 / realQual.length;
+      if (maxFrac > flatShare + 0.01) continue; // has a preference — don't penalize concentration
       const weeks = [...weekMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
       for (let i = 1; i < weeks.length; i++) {
         if (weeks[i][1] === weeks[i - 1][1]) rotationPenalty += 2;
@@ -1259,11 +1273,22 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       );
       if (bbQualified.length === 0) return;
 
-      // Sort by fewest BB assignments (fair rotation), break ties by shuffle on subsequent passes
+      // Sort by weighted BB share: employees with low BB preference are pushed back
+      // so they're picked for BB less often than employees with high BB preference.
+      // Vannie (BB weight 10, Micro weight 70) should rarely end up here; Randy (flat 50)
+      // should do a normal share. Without weighting, Vannie gets pulled to BB equally and
+      // locked out of her preferred Micro station in Layer 4.
+      const bbShare = (empId: number) => {
+        const w = empStationWeight.get(`${empId}-${bloodBankStation.id}`) ?? 50;
+        const count = bbRotation.get(empId) ?? 0;
+        // (count + 1) / weight: lower = further below their fair share. Adding 1 breaks
+        // the day-1 zero tie in favor of higher-weighted employees.
+        return (count + 1) / Math.max(w, 1);
+      };
       const sorted = [...bbQualified].sort((a, b) => {
-        const aCount = bbRotation.get(a.employee_id) ?? 0;
-        const bCount = bbRotation.get(b.employee_id) ?? 0;
-        if (aCount !== bCount) return aCount - bCount;
+        const aShare = bbShare(a.employee_id);
+        const bShare = bbShare(b.employee_id);
+        if (Math.abs(aShare - bShare) > 0.0001) return aShare - bShare;
         // On pass 0 use stable order; on later passes, randomize ties
         return passIdx === 0 ? a.employee_id - b.employee_id : Math.random() - 0.5;
       });
@@ -1324,9 +1349,20 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         if (stIdx >= remainingStations.length) {
           let score = 0;
           for (const [empId, stationId] of assignment) {
+            const quals = getBenchQuals(empId).filter(sid =>
+              mltStations.some(s => s.id === sid)
+            );
             const hist = mltHistory.get(`${empId}-${stationId}`) ?? 0;
-            score += hist * hist;
-            if (lastWeekMLT.get(empId) === stationId) score += 10000;
+            // Proportional history targeting (mirrors Layer 4 CLS scoring)
+            const w = getWeight(empId, stationId);
+            const totalHist = quals.reduce((sum, q) => sum + (mltHistory.get(`${empId}-${q}`) ?? 0), 0);
+            const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
+            const weightFrac = w / totalW;
+            const targetHist = (totalHist + 1) * weightFrac;
+            const deficit = targetHist - hist;
+            score -= deficit * 900;
+            // Waive same-as-last-week penalty for very strong preferences (≥80% share)
+            if (lastWeekMLT.get(empId) === stationId && weightFrac < 0.8) score += 10000;
           }
           // Penalize unfilled stations
           score += (remainingStations.length - assignment.size) * 1000;
@@ -1443,14 +1479,35 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const uniqueCLSIds = [...new Set(clsEmps.map(a => a.employee_id))];
 
       // Sort: single-station employees always first, then most-constrained or shuffled
-      // This ensures employees like Julie (Micro-only) always get their slot before multi-station CLS
+      // This ensures employees like Julie (Micro-only) always get their slot before multi-station CLS.
+      // Within multi-station: order by *preference strength* descending, so employees
+      // with a strong weighted preference (e.g. Vannie 70% Micro) claim their preferred
+      // station BEFORE flat-preference employees fill it up. Without this, greedy
+      // iteration gives the scarce slot to whoever happens to be scored first.
+      const prefStrength = (id: number): number => {
+        const qs = getBenchQuals(id);
+        if (qs.length <= 1) return 1;
+        const weights = qs.map(q => getWeight(id, q));
+        const total = weights.reduce((s, w) => s + w, 0) || 1;
+        return Math.max(...weights) / total; // 1/n = flat, → 1 = maximally skewed
+      };
       const singleStation = uniqueCLSIds.filter(id => getBenchQuals(id).length === 1);
       const multiStation = uniqueCLSIds.filter(id => getBenchQuals(id).length > 1);
       let orderedCLS: number[];
       if (passIdx === 0) {
-        orderedCLS = [...singleStation, ...multiStation.sort((a, b) => getBenchQuals(a).length - getBenchQuals(b).length)];
+        // Primary: preference strength desc. Secondary: fewer quals first (more constrained).
+        const sortedMulti = [...multiStation].sort((a, b) => {
+          const sa = prefStrength(a), sb = prefStrength(b);
+          if (Math.abs(sa - sb) > 0.01) return sb - sa;
+          return getBenchQuals(a).length - getBenchQuals(b).length;
+        });
+        orderedCLS = [...singleStation, ...sortedMulti];
       } else {
-        orderedCLS = [...singleStation, ...shuffle(multiStation)];
+        // Later passes: preserve strong-preference priority but shuffle ties
+        const strong = multiStation.filter(id => prefStrength(id) > 0.5);
+        const flat = multiStation.filter(id => prefStrength(id) <= 0.5);
+        strong.sort((a, b) => prefStrength(b) - prefStrength(a));
+        orderedCLS = [...singleStation, ...strong, ...shuffle(flat)];
       }
 
       // Count current station occupancy from stationMap
@@ -1487,26 +1544,40 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           let score = 0;
 
-          // Staffing need: negative = urgently needs people (must dominate rotation concerns)
-          score -= 5000 * (minNeeded - current);
-
-          // Rotation history
+          // Proportional history targeting: pull placement toward the employee's
+          // weight ratios. For each qualified station, compute the target share of
+          // days-so-far (weight / sum of weights) vs actual history share, and
+          // strongly reward the station with the biggest deficit. When weights are
+          // flat this degenerates to "prefer the least-visited station" = equal rotation.
           const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
-          score += hist * 150;
+          const w = getWeight(empId, sid);
+          const totalHist = quals.reduce((sum, q) => sum + (rotHistory.get(`${empId}-${q}`) ?? 0), 0);
+          const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
+          const weightFrac = w / totalW;
+          // Use (totalHist + 1) so the first placement of the month still matters.
+          const targetHist = (totalHist + 1) * weightFrac;
+          const deficit = targetHist - hist;
+          // Deficit dominates: coefficient is deliberately large so preference
+          // ratios drive placement above all other soft factors.
+          score -= deficit * 5000;
 
-          // Consecutive penalty: same station as last week
-          if (lastWeekStation.get(empId) === sid) score += 1500;
+          // Light tiebreaker for stations that still need bodies (hard block above
+          // already prevents overfill — this only breaks ties between equally-
+          // deficient stations in favor of the one with more open slots).
+          score -= 50 * (minNeeded - current);
+
+          // Consecutive penalty: same station as last week.
+          // Waived when this station is the employee's *top* preference and above
+          // the flat baseline (1/n share). Vannie at 70% Micro should be parked in
+          // Micro week after week — the penalty only applies to flat-preference
+          // employees who should rotate.
+          const maxWForEmp = Math.max(...quals.map(q => getWeight(empId, q)));
+          const flatShare = 1 / quals.length;
+          const isTopPreferred = w === maxWForEmp && weightFrac > flatShare + 0.01;
+          if (lastWeekStation.get(empId) === sid && !isTopPreferred) score += 1500;
 
           // Weekly consistency: bonus if same station earlier this week
           if (weekStationThisWeek.get(empId) === sid) score -= 300;
-
-          // Diversity: never-visited stations get a bonus
-          const allHist = quals.map(q => rotHistory.get(`${empId}-${q}`) ?? 0);
-          const minHist = Math.min(...allHist);
-          if (hist === 0) score -= 800;
-          // Imbalance penalty
-          const imbalance = hist - minHist;
-          score += imbalance * imbalance * 300;
 
           // Scarcity: stations with fewer qualified staff get a boost
           const qualifiedCount = employees.filter(e =>
@@ -1537,13 +1608,21 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
-      // Swap improvement pass: try swapping pairs to improve rotation
+      // Swap improvement pass: try swapping pairs to reduce total proportional deficit.
+      // Deficit = |actualHist - targetHist| for each (emp, station); swap if it
+      // brings both employees closer to their weighted targets.
+      const deficitFor = (empId: number, sid: number): number => {
+        const quals = getBenchQuals(empId);
+        const w = getWeight(empId, sid);
+        const totalHist = quals.reduce((sum, q) => sum + (rotHistory.get(`${empId}-${q}`) ?? 0), 0);
+        const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
+        const target = (totalHist + 1) * (w / totalW);
+        const hist = rotHistory.get(`${empId}-${sid}`) ?? 0;
+        return Math.abs(target - hist);
+      };
       for (const empA of orderedCLS) {
         if (!stationMap.has(empA)) continue;
         const stA = stationMap.get(empA)!;
-        const histA = rotHistory.get(`${empA}-${stA}`) ?? 0;
-        const consecA = lastWeekStation.get(empA) === stA ? 1 : 0;
-        const scoreA = histA * histA + consecA * 10;
 
         for (const empB of orderedCLS) {
           if (empA >= empB || !stationMap.has(empB)) continue;
@@ -1554,15 +1633,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           if (!getBenchQuals(empA).includes(stB)) continue;
           if (!getBenchQuals(empB).includes(stA)) continue;
 
-          const histB = rotHistory.get(`${empB}-${stB}`) ?? 0;
-          const consecB = lastWeekStation.get(empB) === stB ? 1 : 0;
-          const scoreBefore = histA * histA + consecA * 10 + histB * histB + consecB * 10;
-
-          const newHistA = rotHistory.get(`${empA}-${stB}`) ?? 0;
-          const newConsecA = lastWeekStation.get(empA) === stB ? 1 : 0;
-          const newHistB = rotHistory.get(`${empB}-${stA}`) ?? 0;
-          const newConsecB = lastWeekStation.get(empB) === stA ? 1 : 0;
-          const scoreAfter = newHistA * newHistA + newConsecA * 10 + newHistB * newHistB + newConsecB * 10;
+          const scoreBefore = deficitFor(empA, stA) + deficitFor(empB, stB);
+          const scoreAfter = deficitFor(empA, stB) + deficitFor(empB, stA);
 
           if (scoreAfter < scoreBefore) {
             // Undo old history
@@ -1888,23 +1960,27 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           continue;
         }
 
-        // Non-admin employees go to their best bench station (never Admin)
+        // Non-admin employees go to their best bench station (never Admin).
+        // Scoring: understaffing first (hard priority), then employee's weighted
+        // station preference so overflow placements honor the slider.
         const benchQuals = getBenchQuals(a.employee_id);
         const empRole = empRoleMap.get(a.employee_id);
+        const empId = a.employee_id;
+        const totalW = benchQuals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
         let bestSid = -1;
         let bestScore = Infinity;
         for (const sid of benchQuals) {
           const station = realStations.find(s => s.id === sid);
           if (!station) continue;
           // canPlaceAtStation handles all caps (total, CLS, MLT)
-          if (!canPlaceAtStation(a.employee_id, sid, stationMap as any, empRoleMap, shiftName)) continue;
+          if (!canPlaceAtStation(empId, sid, stationMap as any, empRoleMap, shiftName)) continue;
           const current = [...stationMap.values()].filter(v => v === sid).length;
           const minNeeded = getMinStaff(station, shiftName);
-          // Prefer stations that actually need staff; overflow slots are last resort
-          let score = current - minNeeded; // negative = understaffed, positive = overflow
-          if (score >= 0 && isOverflowStation(station)) {
-            score += (overflowBalance.get(sid) ?? 0); // balance Chem/Hema overflow
-          }
+          // Understaffing is the primary driver (negative = needs staff = priority)
+          let score = (current - minNeeded) * 1000;
+          // Weighted preference: higher weight share = lower score (more preferred)
+          const weightFrac = getWeight(empId, sid) / totalW;
+          score -= weightFrac * 600;
           if (score < bestScore) { bestScore = score; bestSid = sid; }
         }
         if (bestSid >= 0) {

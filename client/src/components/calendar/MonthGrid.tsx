@@ -2,11 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, addDays as addDaysFns, subDays } from 'date-fns';
-import { useSchedule, useShifts, useWarnings, useDeleteAssignment, useGenerateSchedule } from '../../hooks/useSchedule';
+import { useSchedule, useShifts, useWarnings, useDeleteAssignment, useUpdateAssignment, useSwapAssignments, useGenerateSchedule } from '../../hooks/useSchedule';
 import { useEmployees } from '../../hooks/useEmployees';
 import { useTimeOff } from '../../hooks/useTimeOff';
 import { useStations, useUpdateStation } from '../../hooks/useStations';
 import AssignmentModal from './AssignmentModal';
+import AssignmentActionsModal from './AssignmentActionsModal';
 import StationStyleEditor from './StationStyleEditor';
 import type { Shift, ScheduleAssignment, Employee, Station } from '../../types';
 import { buildStationStyleMap, getStationStyle, type StationDisplay } from '../../utils/stationStyles';
@@ -31,6 +32,8 @@ export default function MonthGrid() {
   const { data: stationsData = [] } = useStations();
   const updateStation = useUpdateStation();
   const deleteAssignment = useDeleteAssignment(month);
+  const updateAssignment = useUpdateAssignment(month);
+  const swapAssignments = useSwapAssignments(month);
   const generateSchedule = useGenerateSchedule(month);
 
   const stationStyleMap = React.useMemo(() => buildStationStyleMap(stationsData), [stationsData]);
@@ -40,6 +43,7 @@ export default function MonthGrid() {
   }, [stationStyleMap, stationsData]);
 
   const [editingStation, setEditingStation] = useState<Station | null>(null);
+  const [actionsModal, setActionsModal] = useState<{ assignment: ScheduleAssignment; employee: Employee } | null>(null);
 
   // Sort employees: group by shift (AM → PM → Night → Floater), then alphabetize within group
   const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
@@ -168,13 +172,7 @@ export default function MonthGrid() {
     const existing = assignmentIndex.get(key);
 
     if (existing) {
-      setConfirmDialog({
-        title: 'Remove Assignment',
-        message: `Remove ${emp.name} from ${existing.shift_name} on ${dateStr}?`,
-        confirmLabel: 'Remove',
-        confirmColor: 'bg-red-600 hover:bg-red-700',
-        onConfirm: () => { deleteAssignment.mutate(existing.id); setConfirmDialog(null); },
-      });
+      setActionsModal({ assignment: existing, employee: emp });
       return;
     }
 
@@ -837,6 +835,65 @@ export default function MonthGrid() {
         />
       )}
 
+      {/* Assignment actions modal (edit/swap/remove) */}
+      {actionsModal && (() => {
+        const { assignment: a, employee: emp } = actionsModal;
+        const sameShift = assignments
+          .filter(other =>
+            other.date === a.date &&
+            other.shift_id === a.shift_id &&
+            other.id !== a.id
+          )
+          .map(other => ({
+            assignment: other,
+            employee: employees.find(e => e.id === other.employee_id)!,
+          }))
+          .filter(x => x.employee);
+        return (
+          <AssignmentActionsModal
+            assignment={a}
+            employee={emp}
+            sameShiftAssignments={sameShift}
+            stations={stationsData}
+            getStationDisplay={getStationDisplay}
+            onChangeStation={(stationId) => {
+              updateAssignment.mutate(
+                { id: a.id, station_id: stationId },
+                {
+                  onSuccess: () => {
+                    toast.success('Station updated');
+                    setActionsModal(null);
+                  },
+                  onError: (err) => toast.error(err.message),
+                }
+              );
+            }}
+            onSwap={(otherId) => {
+              swapAssignments.mutate(
+                { a: a.id, b: otherId },
+                {
+                  onSuccess: () => {
+                    toast.success('Stations swapped');
+                    setActionsModal(null);
+                  },
+                  onError: (err) => toast.error(err.message),
+                }
+              );
+            }}
+            onRemove={() => {
+              deleteAssignment.mutate(a.id, {
+                onSuccess: () => {
+                  toast.success('Assignment removed');
+                  setActionsModal(null);
+                },
+                onError: (err) => toast.error(err.message),
+              });
+            }}
+            onClose={() => setActionsModal(null)}
+          />
+        );
+      })()}
+
       {/* Warnings are now shown inline within each shift section of the grid */}
 
       {/* Roster grid */}
@@ -886,8 +943,8 @@ export default function MonthGrid() {
                           className={`px-1 py-2 text-center font-bold border-b-2 min-w-[38px] cursor-pointer ${
                             dIsSat ? 'border-l-2 border-l-orange-300' : ''
                           } ${
-                            dHasCrit ? 'bg-red-100 text-red-800 border-red-300' :
-                            dHasWarn ? 'bg-amber-100 text-amber-800 border-amber-300' :
+                            dHasCrit ? 'bg-red-200 text-red-900 border-red-500 ring-1 ring-inset ring-red-400' :
+                            dHasWarn ? 'bg-orange-300 text-orange-900 border-orange-600 ring-1 ring-inset ring-orange-500' :
                             dIsToday ? 'bg-blue-100 text-blue-800 border-gray-300' :
                             dIsWknd ? 'bg-orange-100 text-orange-800 border-gray-300' :
                             'bg-gray-100 text-gray-600 border-gray-300'

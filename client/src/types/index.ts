@@ -30,6 +30,7 @@ export interface Station {
   is_active?: number;
   color?: string;
   abbr?: string;
+  weight?: number;
 }
 
 export interface Employee {

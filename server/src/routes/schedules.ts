@@ -360,6 +360,60 @@ router.post('/pto-impact', (req, res) => {
   });
 });
 
+// Update assignment (station change)
+const patchSchema = z.object({
+  station_id: z.number().int().positive().nullable(),
+});
+router.patch('/:id', (req, res) => {
+  const parsed = patchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  const result = db.prepare('UPDATE schedule_assignments SET station_id = ? WHERE id = ?')
+    .run(parsed.data.station_id, req.params.id);
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'Assignment not found' });
+  }
+  const updated = db.prepare(`
+    SELECT sa.id, sa.employee_id, sa.shift_id, sa.date, sa.station_id,
+           e.name as employee_name, e.employment_type,
+           s.name as shift_name, s.start_time, s.end_time,
+           st.name as station_name
+    FROM schedule_assignments sa
+    JOIN employees e ON sa.employee_id = e.id
+    JOIN shifts s ON sa.shift_id = s.id
+    LEFT JOIN stations st ON sa.station_id = st.id
+    WHERE sa.id = ?
+  `).get(req.params.id);
+  res.json(updated);
+});
+
+// Swap stations between two assignments (atomic)
+const swapSchema = z.object({
+  assignment_a: z.number().int().positive(),
+  assignment_b: z.number().int().positive(),
+});
+router.post('/swap', (req, res) => {
+  const parsed = swapSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  const { assignment_a, assignment_b } = parsed.data;
+
+  const a = db.prepare('SELECT id, station_id FROM schedule_assignments WHERE id = ?').get(assignment_a) as any;
+  const b = db.prepare('SELECT id, station_id FROM schedule_assignments WHERE id = ?').get(assignment_b) as any;
+  if (!a || !b) {
+    return res.status(404).json({ error: 'Assignment not found' });
+  }
+
+  db.transaction(() => {
+    db.prepare('UPDATE schedule_assignments SET station_id = ? WHERE id = ?').run(b.station_id, a.id);
+    db.prepare('UPDATE schedule_assignments SET station_id = ? WHERE id = ?').run(a.station_id, b.id);
+  })();
+
+  res.json({ ok: true });
+});
+
 // Delete assignment
 router.delete('/:id', (req, res) => {
   const result = db.prepare('DELETE FROM schedule_assignments WHERE id = ?').run(req.params.id);

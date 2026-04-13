@@ -17,7 +17,7 @@ router.get('/', (_req, res) => {
   const employees = db.prepare('SELECT * FROM employees WHERE is_active = 1 ORDER BY name').all() as any[];
   const constraints = db.prepare('SELECT * FROM employee_constraints ORDER BY employee_id').all() as any[];
   const empStations = db.prepare(`
-    SELECT es.employee_id, s.id, s.name, es.priority FROM employee_stations es
+    SELECT es.employee_id, s.id, s.name, s.color, s.abbr, es.priority, es.weight FROM employee_stations es
     JOIN stations s ON es.station_id = s.id
     WHERE s.is_active = 1
     ORDER BY es.employee_id, es.priority
@@ -34,7 +34,7 @@ router.get('/', (_req, res) => {
   const stationMap = new Map<number, any[]>();
   for (const es of empStations) {
     if (!stationMap.has(es.employee_id)) stationMap.set(es.employee_id, []);
-    stationMap.get(es.employee_id)!.push({ id: es.id, name: es.name });
+    stationMap.get(es.employee_id)!.push({ id: es.id, name: es.name, color: es.color, abbr: es.abbr, priority: es.priority, weight: es.weight });
   }
 
   const result = employees.map((emp) => ({

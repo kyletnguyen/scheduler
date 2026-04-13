@@ -106,7 +106,7 @@ router.delete('/:id', (req, res) => {
 // Get stations for an employee (ordered by priority)
 router.get('/employee/:employeeId', (req, res) => {
   const stations = db.prepare(`
-    SELECT s.*, es.priority FROM stations s
+    SELECT s.*, es.priority, es.weight FROM stations s
     JOIN employee_stations es ON es.station_id = s.id
     WHERE es.employee_id = ? AND s.is_active = 1
     ORDER BY es.priority
@@ -114,25 +114,43 @@ router.get('/employee/:employeeId', (req, res) => {
   res.json(stations);
 });
 
-// Set stations for an employee (replaces existing, array order = priority)
+// Set stations for an employee (replaces existing)
+// Accepts either an array of station IDs (legacy) or an array of { station_id, weight }.
+// Weight is 0-100; default 50 when not provided.
+const empStationInput = z.union([
+  z.array(z.number().int().positive()),
+  z.array(z.object({
+    station_id: z.number().int().positive(),
+    weight: z.number().int().min(0).max(100).optional(),
+  })),
+]);
+
 router.put('/employee/:employeeId', (req, res) => {
-  const parsed = z.array(z.number().int().positive()).safeParse(req.body);
+  const parsed = empStationInput.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: 'Expected array of station IDs' });
+    return res.status(400).json({ error: 'Expected array of station IDs or { station_id, weight } objects' });
   }
 
   const employeeId = Number(req.params.employeeId);
 
+  // Normalize to { station_id, weight } form
+  const normalized = parsed.data.map((item, idx) => {
+    if (typeof item === 'number') {
+      return { station_id: item, weight: 50, priority: idx + 1 };
+    }
+    return { station_id: item.station_id, weight: item.weight ?? 50, priority: idx + 1 };
+  });
+
   db.transaction(() => {
     db.prepare('DELETE FROM employee_stations WHERE employee_id = ?').run(employeeId);
-    const insert = db.prepare('INSERT INTO employee_stations (employee_id, station_id, priority) VALUES (?, ?, ?)');
-    parsed.data.forEach((stationId, index) => {
-      insert.run(employeeId, stationId, index + 1);
-    });
+    const insert = db.prepare('INSERT INTO employee_stations (employee_id, station_id, priority, weight) VALUES (?, ?, ?, ?)');
+    for (const item of normalized) {
+      insert.run(employeeId, item.station_id, item.priority, item.weight);
+    }
   })();
 
   const stations = db.prepare(`
-    SELECT s.*, es.priority FROM stations s
+    SELECT s.*, es.priority, es.weight FROM stations s
     JOIN employee_stations es ON es.station_id = s.id
     WHERE es.employee_id = ? AND s.is_active = 1
     ORDER BY es.priority

@@ -38,6 +38,31 @@ export async function deleteAssignment(id: number): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete assignment');
 }
 
+export async function updateAssignment(id: number, data: { station_id: number | null }): Promise<ScheduleAssignment> {
+  const res = await fetch(`${BASE}/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to update assignment');
+  }
+  return res.json();
+}
+
+export async function swapAssignments(assignment_a: number, assignment_b: number): Promise<void> {
+  const res = await fetch(`${BASE}/swap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignment_a, assignment_b }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to swap assignments');
+  }
+}
+
 export interface PTOImpact {
   employee_name: string;
   dates_checked: number;

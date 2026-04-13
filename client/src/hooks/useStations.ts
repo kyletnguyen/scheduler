@@ -32,8 +32,8 @@ export function useDeleteStation() {
 export function useSaveEmployeeStations() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ employeeId, stationIds }: { employeeId: number; stationIds: number[] }) =>
-      saveEmployeeStations(employeeId, stationIds),
+    mutationFn: ({ employeeId, stations }: { employeeId: number; stations: { station_id: number; weight: number }[] }) =>
+      saveEmployeeStations(employeeId, stations),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['employees'] });
       qc.invalidateQueries({ queryKey: ['stations'] });

@@ -33,11 +33,14 @@ export async function deleteStation(id: number): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete station');
 }
 
-export async function saveEmployeeStations(employeeId: number, stationIds: number[]): Promise<Station[]> {
+export async function saveEmployeeStations(
+  employeeId: number,
+  stations: { station_id: number; weight: number }[]
+): Promise<Station[]> {
   const res = await fetch(`${BASE}/employee/${employeeId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(stationIds),
+    body: JSON.stringify(stations),
   });
   if (!res.ok) throw new Error('Failed to save employee stations');
   return res.json();
