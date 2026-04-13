@@ -1016,11 +1016,27 @@ export default function MonthGrid() {
                         ? getStationDisplay(assignment.station_name)
                         : null;
 
+                      // Check if this employee is covering a partial PTO coworker at the same station
+                      const isCoveringPartialPTO = assignment.station_id != null && assignments.some(other =>
+                        other.id !== assignment.id
+                        && other.date === dateStr
+                        && other.station_id === assignment.station_id
+                        && timeOffIndex.get(other.employee_id)?.get(dateStr) === 'custom'
+                      );
+
                       if (isCrossShift && icon) {
                         // Show shift badge in home row when working a different shift
                         cellContent = (
                           <span className={`w-7 h-5 rounded text-[10px] font-bold flex items-center justify-center ${icon.bg} ${icon.text} shadow-sm ring-1 ring-inset ring-white/40`}>
                             {icon.label}
+                          </span>
+                        );
+                      } else if (station && isCoveringPartialPTO) {
+                        // Split duty — covering for someone with partial PTO
+                        cellContent = (
+                          <span className="h-5 px-1 rounded text-[8px] font-bold flex items-center justify-center text-white shadow-sm gap-px" style={{ backgroundColor: station.color }}>
+                            <span>{station.abbr}</span>
+                            <span className="text-white/70">+</span>
                           </span>
                         );
                       } else if (station) {
@@ -1435,26 +1451,38 @@ export default function MonthGrid() {
                                 <span className="text-[10px] text-gray-400">({group.length})</span>
                               </div>
                               <div className="space-y-0.5 pl-1">
-                                {group.map(a => {
-                                  const empInfo = employees.find(e => e.id === a.employee_id);
-                                  const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
-                                    : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
-                                    : 'bg-blue-100 text-blue-700';
-                                  const isPartialPTO = timeOffIndex.get(a.employee_id)?.get(date) === 'custom';
-                                  return (
-                                    <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
-                                      <span className="font-medium text-gray-800">{a.employee_name}</span>
-                                      <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
-                                        {empInfo?.role ?? '?'}
-                                      </span>
-                                      {isPartialPTO && (
-                                        <span className="text-[9px] px-1.5 py-0.5 rounded-sm font-bold bg-red-100 text-red-700 border border-red-200">
-                                          1/2 DAY
+                                {(() => {
+                                  // Find who has partial PTO in this station group
+                                  const partialPTONames = group
+                                    .filter(a => timeOffIndex.get(a.employee_id)?.get(date) === 'custom')
+                                    .map(a => a.employee_name);
+                                  return group.map(a => {
+                                    const empInfo = employees.find(e => e.id === a.employee_id);
+                                    const roleBg = empInfo?.role === 'admin' ? 'bg-orange-100 text-orange-700'
+                                      : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
+                                      : 'bg-blue-100 text-blue-700';
+                                    const isPartialPTO = timeOffIndex.get(a.employee_id)?.get(date) === 'custom';
+                                    const isCovering = !isPartialPTO && partialPTONames.length > 0;
+                                    return (
+                                      <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
+                                        <span className="font-medium text-gray-800">{a.employee_name}</span>
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-sm font-bold uppercase ${roleBg}`}>
+                                          {empInfo?.role ?? '?'}
                                         </span>
-                                      )}
-                                    </div>
-                                  );
-                                })}
+                                        {isPartialPTO && (
+                                          <span className="text-[9px] px-1.5 py-0.5 rounded-sm font-bold bg-red-100 text-red-700 border border-red-200">
+                                            1/2 DAY
+                                          </span>
+                                        )}
+                                        {isCovering && (
+                                          <span className="text-[9px] px-1.5 py-0.5 rounded-sm font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                                            covers 2nd half for {partialPTONames.join(', ')}
+                                          </span>
+                                        )}
+                                      </div>
+                                    );
+                                  });
+                                })()}
                               </div>
                             </div>
                           );
