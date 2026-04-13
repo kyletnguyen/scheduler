@@ -2450,12 +2450,23 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
+
+            // Role matching: MLT positions need MLT cover, CLS positions need CLS/Admin cover
+            const partialRole = empRoleMap.get(partialEmps[0][0]);
+            const canCoverRole = (eid: number): boolean => {
+              const role = empRoleMap.get(eid);
+              if (partialRole === 'mlt') return role === 'mlt';
+              // CLS or admin positions can be covered by CLS or admin
+              return role === 'cls' || role === 'admin';
+            };
+            const canCover = (eid: number) => isQualified(eid) && canCoverRole(eid);
+
             let filled = false;
 
             // S1: unassigned employee
             for (const a of pool) {
               if (stationMap.has(a.employee_id)) continue;
-              if (!isQualified(a.employee_id)) continue;
+              if (!canCover(a.employee_id)) continue;
               _origSet(a.employee_id, station.id);
               filled = true;
               break;
@@ -2468,7 +2479,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               const osAssignees = [...stationMap.entries()].filter(([, sid]) => sid === os.id);
               if (osAssignees.length <= getMinStaff(os, shiftName)) continue;
               for (const [eid] of osAssignees) {
-                if (!isQualified(eid)) continue;
+                if (!canCover(eid)) continue;
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
                 filled = true;
@@ -2479,44 +2490,46 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             if (filled) continue;
 
             // S3: pull admin from ANY station (prefer Admin desk first)
-            const admins = [...stationMap.entries()]
-              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
-              .sort(([, a], [, b]) => {
-                const aAdmin = adminStation && a === adminStation.id ? 0 : 1;
-                const bAdmin = adminStation && b === adminStation.id ? 0 : 1;
-                return aAdmin - bAdmin;
-              });
-            for (const [eid] of admins) {
-              stationMap.delete(eid);
-              _origSet(eid, station.id);
-              filled = true;
-              break;
+            // Only for CLS positions — admins can cover CLS but not MLT
+            if (partialRole !== 'mlt') {
+              const admins = [...stationMap.entries()]
+                .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
+                .sort(([, a], [, b]) => {
+                  const aAdmin = adminStation && a === adminStation.id ? 0 : 1;
+                  const bAdmin = adminStation && b === adminStation.id ? 0 : 1;
+                  return aAdmin - bAdmin;
+                });
+              for (const [eid] of admins) {
+                stationMap.delete(eid);
+                _origSet(eid, station.id);
+                filled = true;
+                break;
+              }
+              if (filled) continue;
             }
-            if (filled) continue;
 
-            // S4: chain swap — CLS covers here, admin backfills their station
+            // S4: chain swap — same-role employee covers here, admin backfills their station
             for (const os of realStations) {
               if (os.id === station.id) continue;
               const osAssignees = [...stationMap.entries()].filter(([, sid]) => sid === os.id);
-              for (const [clsEid] of osAssignees) {
-                if (!isQualified(clsEid)) continue;
-                if (empRoleMap.get(clsEid) === 'mlt') continue;
+              for (const [swapEid] of osAssignees) {
+                if (!canCover(swapEid)) continue;
                 if (osAssignees.length - 1 < getMinStaff(os, shiftName)) {
                   const bf = [...stationMap.entries()].find(([eid]) =>
-                    eid !== clsEid && empRoleMap.get(eid) === 'admin'
+                    eid !== swapEid && empRoleMap.get(eid) === 'admin'
                     && (empStationMap.get(eid) ?? []).includes(os.id)
                   );
                   if (bf) {
                     stationMap.delete(bf[0]);
-                    stationMap.delete(clsEid);
+                    stationMap.delete(swapEid);
                     _origSet(bf[0], os.id);
-                    _origSet(clsEid, station.id);
+                    _origSet(swapEid, station.id);
                     filled = true;
                     break;
                   }
                 } else {
-                  stationMap.delete(clsEid);
-                  _origSet(clsEid, station.id);
+                  stationMap.delete(swapEid);
+                  _origSet(swapEid, station.id);
                   filled = true;
                   break;
                 }

@@ -1016,13 +1016,19 @@ export default function MonthGrid() {
                         ? getStationDisplay(assignment.station_name)
                         : null;
 
-                      // Check if this employee is covering a partial PTO coworker at the same station
-                      const isCoveringPartialPTO = assignment.station_id != null && assignments.some(other =>
+                      // Check if this employee was moved to cover a partial PTO coworker.
+                      // Only true if: (a) someone at the same station has partial PTO, AND
+                      // (b) this employee's home station is different (they were reassigned).
+                      const homeStationName = emp.role === 'admin' ? 'Admin'
+                        : emp.stations?.[0]?.name ?? null;
+                      const isAtHomeStation = homeStationName === assignment.station_name;
+                      const hasPTOCoworker = assignment.station_id != null && assignments.some(other =>
                         other.id !== assignment.id
                         && other.date === dateStr
                         && other.station_id === assignment.station_id
                         && timeOffIndex.get(other.employee_id)?.get(dateStr) === 'custom'
                       );
+                      const isCoveringPartialPTO = hasPTOCoworker && !isAtHomeStation;
 
                       if (isCrossShift && icon) {
                         // Show shift badge in home row when working a different shift
@@ -1031,18 +1037,14 @@ export default function MonthGrid() {
                             {icon.label}
                           </span>
                         );
-                      } else if (station && isCoveringPartialPTO) {
+                      } else if (station && isCoveringPartialPTO && homeStationName) {
                         // Split duty — show home station → coverage station (e.g. AD→BB)
-                        // Home = Admin for admin role, otherwise their first qualified station
-                        const homeStation = emp.role === 'admin'
-                          ? getStationDisplay('Admin')
-                          : emp.stations?.[0]?.name
-                            ? getStationDisplay(emp.stations[0].name)
-                            : null;
-                        const homeAbbr = homeStation && homeStation.abbr !== station.abbr ? homeStation.abbr : null;
+                        const homeDisplay = getStationDisplay(homeStationName);
                         cellContent = (
                           <span className="h-5 px-1 rounded text-[8px] font-bold flex items-center justify-center text-white shadow-sm" style={{ backgroundColor: station.color }}>
-                            {homeAbbr ? <><span style={{ color: 'rgba(255,255,255,0.7)' }}>{homeAbbr}</span><span style={{ color: 'rgba(255,255,255,0.5)' }}>→</span>{station.abbr}</> : station.abbr}
+                            <span style={{ color: 'rgba(255,255,255,0.7)' }}>{homeDisplay.abbr}</span>
+                            <span style={{ color: 'rgba(255,255,255,0.5)' }}>→</span>
+                            {station.abbr}
                           </span>
                         );
                       } else if (station) {
@@ -1468,7 +1470,11 @@ export default function MonthGrid() {
                                       : empInfo?.role === 'mlt' ? 'bg-cyan-100 text-cyan-700'
                                       : 'bg-blue-100 text-blue-700';
                                     const isPartialPTO = timeOffIndex.get(a.employee_id)?.get(date) === 'custom';
-                                    const isCovering = !isPartialPTO && partialPTONames.length > 0;
+                                    // Only show "covers" if this person was moved here (not their home station)
+                                    const empHome = empInfo?.role === 'admin' ? 'Admin'
+                                      : empInfo?.stations?.[0]?.name ?? null;
+                                    const isCovering = !isPartialPTO && partialPTONames.length > 0
+                                      && empHome !== sName;
                                     return (
                                       <div key={a.id} className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded text-sm">
                                         <span className="font-medium text-gray-800">{a.employee_name}</span>
