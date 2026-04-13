@@ -293,6 +293,14 @@ export default function MonthGrid() {
         pdf.text('—', lx + 9, ly - 1, { align: 'center' });
         pdf.setTextColor(80, 80, 80);
         pdf.text('Off', lx + 22, ly);
+        lx += pdf.getTextWidth('Off') + 32;
+
+        pdf.setTextColor(100, 100, 100);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text('*', lx + 2, ly);
+        pdf.setTextColor(80, 80, 80);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text('= covers 2nd half (partial PTO)', lx + 9, ly);
       };
 
       // Footer renderer
@@ -362,9 +370,8 @@ export default function MonthGrid() {
 
               if (isCrossShift && icon) {
                 cells.push(icon.label);
-              } else if (stationDisplay && isCoveringPTO && homeStationName) {
-                const homeDisplay = getStationDisplay(homeStationName);
-                cells.push(`${homeDisplay.abbr}→${stationDisplay.abbr}`);
+              } else if (stationDisplay && isCoveringPTO) {
+                cells.push(`${stationDisplay.abbr}*`);
               } else {
                 cells.push(stationDisplay ? stationDisplay.abbr : (icon ? icon.label : assignment.shift_name.charAt(0)));
               }
@@ -510,9 +517,7 @@ export default function MonthGrid() {
             const cellH = data.cell.height;
 
             const cd = cellData.get(`${ri}-${dayIdx}`);
-            // Wider badge for split-duty labels (e.g. AD→BB)
-            const isWide = text.includes('→');
-            const badgeW = Math.min(cellW - 4, isWide ? 32 : 20);
+            const badgeW = Math.min(cellW - 4, 20);
             const badgeH = Math.min(cellH - 6, 14);
             const badgeX = cellX + (cellW - badgeW) / 2;
             const badgeY = cellY + (cellH - badgeH) / 2;
