@@ -2255,8 +2255,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
           }
 
-          // Step 6: Last resort — move admin-role employees from Admin to understaffed bench stations
-          // Only fires when no CLS/MLT could fill the gap (Steps 1-5 already ran)
+          // Step 6: Move admin/supervisor to understaffed bench stations they're qualified for.
+          // Admin can either fill the understaffed station directly, or backfill a mid
+          // station so its CLS can move to the understaffed station (chain swap).
+          // Step 7 will free the admin back to Admin if a non-admin can replace them later.
           if (adminStation) {
             for (const underStation of realStations) {
               if (underStation.id === adminStation.id) continue;
@@ -2264,39 +2266,24 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               const underMin = getMinStaff(underStation, shiftName);
               if (underCount >= underMin) continue;
 
-              // Check if ANY non-admin employee could still fill this — skip if so
-              const nonAdminCanFill = pool.some(a => {
-                const r = empRoleMap.get(a.employee_id);
-                if (r === 'admin') return false;
-                if (stationMap.get(a.employee_id) === underStation.id) return false; // already there
-                if (!(empStationMap.get(a.employee_id) ?? []).includes(underStation.id)) return false;
-                return canPlaceAtStation(a.employee_id, underStation.id, stationMap as any, empRoleMap, shiftName);
-              });
-              if (nonAdminCanFill) continue;
-
-              // No CLS/MLT can fill — try admin employees at Admin station
+              // Strategy A: Admin directly fills the understaffed station
               const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
               for (const [eid] of adminAssignees) {
                 const role = empRoleMap.get(eid);
                 if (role !== 'admin') continue;
                 if (!(empStationMap.get(eid) ?? []).includes(underStation.id)) continue;
                 if (!canPlaceAtStation(eid, underStation.id, stationMap as any, empRoleMap, shiftName)) continue;
-                // Move admin to understaffed bench station
                 stationMap.delete(eid);
                 _origSet(eid, underStation.id);
                 changed = true;
                 break;
               }
-            }
 
-            // Step 6b: Admin chain swap — admin covers station X, freeing CLS at X to move to understaffed station Y
-            for (const underStation of realStations) {
-              if (underStation.id === adminStation.id) continue;
-              const underCount = [...stationMap.values()].filter(v => v === underStation.id).length;
-              const underMin = getMinStaff(underStation, shiftName);
-              if (underCount >= underMin) continue;
+              // Re-check after Strategy A
+              const underCountNow = [...stationMap.values()].filter(v => v === underStation.id).length;
+              if (underCountNow >= underMin) continue;
 
-              // Find a bench station that has someone qualified for underStation
+              // Strategy B: Admin backfills station X, freeing CLS at X to move to understaffed station
               for (const midStation of realStations) {
                 if (midStation.id === underStation.id || midStation.id === adminStation.id) continue;
                 const midAssignees = [...stationMap.entries()].filter(([, sid]) => sid === midStation.id);

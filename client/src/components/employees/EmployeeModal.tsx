@@ -942,7 +942,8 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
 
   const stationStyleMap = useMemo(() => buildStationStyleMap(allStations), [allStations]);
 
-  // Percentages per station_id (integers summing to 100 when any are selected).
+  // Each slider is independent — no auto-redistribution.
+  // User sets each value, we show the total, and normalize on save.
   const [percents, setPercents] = useState<Map<number, number>>(() => {
     const raw = new Map<number, number>();
     for (const s of employee.stations ?? []) {
@@ -951,25 +952,36 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
     return normalizeToPercents(raw);
   });
 
+  const total = useMemo(() => {
+    let sum = 0;
+    for (const v of percents.values()) sum += v;
+    return sum;
+  }, [percents]);
+
   const toggleStation = (id: number) => {
     const next = new Map(percents);
     if (next.has(id)) {
       next.delete(id);
-      setPercents(normalizeToPercents(next));
     } else {
-      const newCount = next.size + 1;
-      const newShare = Math.round(100 / newCount);
-      next.set(id, 0);
-      setPercents(redistribute(next, id, newShare));
+      // New station gets an equal share of what's remaining (or a fair split)
+      const remaining = Math.max(0, 100 - total);
+      next.set(id, remaining > 0 ? remaining : Math.round(100 / (next.size + 1)));
     }
+    setPercents(next);
   };
 
   const commitPercent = useCallback((id: number, value: number) => {
-    setPercents(prev => redistribute(prev, id, value));
+    setPercents(prev => {
+      const next = new Map(prev);
+      next.set(id, Math.max(0, Math.min(100, Math.round(value))));
+      return next;
+    });
   }, []);
 
   const handleSave = () => {
-    const payload = [...percents.entries()].map(([station_id, weight]) => ({ station_id, weight }));
+    // Normalize to 100% on save so the algorithm gets clean percentages
+    const normalized = normalizeToPercents(percents);
+    const payload = [...normalized.entries()].map(([station_id, weight]) => ({ station_id, weight }));
     saveMutation.mutate(
       { employeeId: employee.id, stations: payload },
       {
@@ -980,12 +992,14 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
   };
 
   const selectedCount = allStations.filter(s => percents.has(s.id)).length;
+  const isExact = total === 100;
+  const diff = total - 100;
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-500">
-        Click a station to add it, then adjust the percentage to set how often this employee should work there.
-        Percentages always add up to 100% — moving one slider auto-adjusts the others.
+        Click a station to add it, then set each percentage independently.
+        Values will be normalized to 100% when saved.
       </p>
 
       {/* Station toggle pills */}
@@ -1016,7 +1030,22 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
       {/* Percentage sliders — order follows allStations (DB order), never reorders */}
       {selectedCount > 0 && (
         <div>
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Station Mix (must total 100%)</span>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Station Mix</span>
+            <span className={`text-sm font-bold tabular-nums px-2 py-0.5 rounded ${
+              isExact
+                ? 'text-green-700 bg-green-100'
+                : diff > 0
+                  ? 'text-red-700 bg-red-100'
+                  : 'text-amber-700 bg-amber-100'
+            }`}>
+              {total}%{!isExact && (
+                <span className="font-normal text-xs ml-1">
+                  ({diff > 0 ? `+${diff}` : diff} from 100)
+                </span>
+              )}
+            </span>
+          </div>
           <div className="space-y-2">
             {allStations
               .filter(s => percents.has(s.id))
@@ -1037,11 +1066,16 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
                 );
               })}
           </div>
+          {!isExact && (
+            <p className="text-xs text-gray-400 mt-1.5">
+              Values will be proportionally scaled to 100% on save.
+            </p>
+          )}
         </div>
       )}
 
       <div className="pt-1">
-        <button onClick={handleSave} disabled={saveMutation.isPending}
+        <button onClick={handleSave} disabled={saveMutation.isPending || selectedCount === 0}
           className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
           {saveMutation.isPending ? 'Saving...' : 'Save Preferences'}
         </button>
