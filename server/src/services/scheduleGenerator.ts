@@ -1961,6 +1961,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
       // Track overflow CLS at Chem/Hema for monthly balance
       const overflowBalance = new Map<number, number>();
+      let ptoCoverageDiag: Map<string, string> | null = null;
 
       for (const groupKey of sortedGroupKeys) {
         const group = shiftDateGroups.get(groupKey)!;
@@ -2456,12 +2457,16 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const canCoverRole = (eid: number): boolean => {
               const role = empRoleMap.get(eid);
               if (partialRole === 'mlt') return role === 'mlt';
-              // CLS or admin positions can be covered by CLS or admin
               return role === 'cls' || role === 'admin';
             };
             const canCover = (eid: number) => isQualified(eid) && canCoverRole(eid);
 
             let filled = false;
+            const diag: string[] = []; // diagnostic breadcrumbs for debugging
+
+            const poolSize = pool.length;
+            const unassignedCount = pool.filter(a => !stationMap.has(a.employee_id)).length;
+            diag.push(`role=${partialRole} pool=${poolSize} unassigned=${unassignedCount}`);
 
             // S1: unassigned employee
             for (const a of pool) {
@@ -2472,6 +2477,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               break;
             }
             if (filled) continue;
+            diag.push('S1:miss');
 
             // S2: pull from overstaffed station
             for (const os of realStations) {
@@ -2488,9 +2494,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               if (filled) break;
             }
             if (filled) continue;
+            diag.push('S2:miss');
 
-            // S3: pull admin from ANY station (prefer Admin desk first)
-            // Only for CLS positions — admins can cover CLS but not MLT
+            // S3: pull admin from ANY station (CLS positions only)
             if (partialRole !== 'mlt') {
               const admins = [...stationMap.entries()]
                 .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
@@ -2499,6 +2505,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                   const bAdmin = adminStation && b === adminStation.id ? 0 : 1;
                   return aAdmin - bAdmin;
                 });
+              diag.push(`S3:${admins.length}admins`);
               for (const [eid] of admins) {
                 stationMap.delete(eid);
                 _origSet(eid, station.id);
@@ -2508,11 +2515,19 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               if (filled) continue;
             }
 
-            // S3b: pull admin-parked MLT from ANY station (for MLT positions)
-            // Admin-parked MLTs default to Admin desk but may have been moved to
-            // another bench station by Layer 5 or gapFill — search everywhere.
-            // Prefer those at Admin first (less disruptive to pull from desk).
+            // S3b: pull admin-parked MLT from ANY station (MLT positions)
             if (partialRole === 'mlt') {
+              // Diagnostic: list all MLTs in pool with their location and qualifications
+              const allMLTsInMap = [...stationMap.entries()].filter(([eid]) => empRoleMap.get(eid) === 'mlt');
+              const mltInfo = allMLTsInMap.map(([eid, sid]) => {
+                const name = employees.find(e => e.id === eid)?.name ?? eid;
+                const atStation = stations.find(s => s.id === sid)?.name ?? sid;
+                const parked = isAdminParked(eid);
+                const qual = isQualified(eid);
+                return `${name}@${atStation}(parked=${parked},qual=${qual})`;
+              });
+              diag.push(`S3b:mlts=[${mltInfo.join(',')}]`);
+
               const parkedMLTs = [...stationMap.entries()]
                 .filter(([eid]) =>
                   empRoleMap.get(eid) === 'mlt'
@@ -2533,9 +2548,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               if (filled) continue;
             }
 
-            // S3c: pull ANY MLT from any station (for MLT positions)
-            // If no admin-parked MLT found, try regular MLTs from other stations.
-            // Prefer MLTs at Admin desk, then those at overstaffed stations.
+            // S3c: pull ANY MLT from any station (MLT positions)
             if (partialRole === 'mlt') {
               const allMLTs = [...stationMap.entries()]
                 .filter(([eid, sid]) =>
@@ -2544,17 +2557,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                   && isQualified(eid)
                 )
                 .sort(([, sidA], [, sidB]) => {
-                  // Prefer Admin desk first, then by station staff surplus
                   const aAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
                   const bAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
                   if (aAdmin !== bAdmin) return aAdmin - bAdmin;
                   const aSurplus = [...stationMap.values()].filter(v => v === sidA).length - getMinStaff(realStations.find(s => s.id === sidA) ?? realStations[0], shiftName);
                   const bSurplus = [...stationMap.values()].filter(v => v === sidB).length - getMinStaff(realStations.find(s => s.id === sidB) ?? realStations[0], shiftName);
-                  return bSurplus - aSurplus; // higher surplus first
+                  return bSurplus - aSurplus;
                 });
+              diag.push(`S3c:${allMLTs.length}mlts`);
               for (const [eid, fromSid] of allMLTs) {
-                // Only pull if their current station won't be left without an MLT
-                // OR they're at Admin (always OK to pull)
                 if (adminStation && fromSid === adminStation.id) {
                   stationMap.delete(eid);
                   _origSet(eid, station.id);
@@ -2572,6 +2583,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                 }
               }
               if (filled) continue;
+              diag.push('S3c:miss');
             }
 
             // S4: chain swap — same-role employee covers here, admin backfills their station
@@ -2603,6 +2615,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                 }
               }
               if (filled) break;
+            }
+            // If all strategies failed, store diagnostic for the warning
+            if (!filled) {
+              diag.push('S4:miss');
+              const diagKey = `${station.id}-${date}`;
+              if (!ptoCoverageDiag) ptoCoverageDiag = new Map();
+              ptoCoverageDiag.set(diagKey, diag.join(' | '));
             }
           }
         }
@@ -2707,7 +2726,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const fullCoverageEmps = stationAssignees.filter(a => !partialPTOSet.has(`${a.employee_id}-${date}`));
           if (fullCoverageEmps.length === 0) {
             const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
-            passWarnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift (${shiftLabel})`);
+            const diagInfo = ptoCoverageDiag?.get(`${station.id}-${date}`) ?? '';
+            passWarnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift${diagInfo ? ` [DEBUG: ${diagInfo}]` : ''} (${shiftLabel})`);
           }
         }
       }
