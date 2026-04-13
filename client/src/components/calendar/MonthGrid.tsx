@@ -265,42 +265,45 @@ export default function MonthGrid() {
           lx += pdf.getTextWidth(item.name) + 32;
         }
 
-        // PTO + Off on the same row
+        // Second row — PTO, Half Day, Off, * coverage
+        const ly2 = ly + 14;
+        lx = 40;
+
         pdf.setFillColor(254, 226, 226);
-        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
         pdf.setTextColor(220, 38, 38);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('P', lx + 9, ly - 1, { align: 'center' });
+        pdf.text('P', lx + 9, ly2 - 1, { align: 'center' });
         pdf.setTextColor(80, 80, 80);
         pdf.setFont('helvetica', 'normal');
-        pdf.text('PTO', lx + 22, ly);
+        pdf.text('PTO', lx + 22, ly2);
         lx += pdf.getTextWidth('PTO') + 32;
 
         pdf.setFillColor(254, 178, 178);
-        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
         pdf.setTextColor(153, 27, 27);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('½', lx + 9, ly - 1, { align: 'center' });
+        pdf.text('½', lx + 9, ly2 - 1, { align: 'center' });
         pdf.setTextColor(80, 80, 80);
         pdf.setFont('helvetica', 'normal');
-        pdf.text('Half Day', lx + 22, ly);
+        pdf.text('Half Day', lx + 22, ly2);
         lx += pdf.getTextWidth('Half Day') + 32;
 
         pdf.setFillColor(240, 240, 240);
-        pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
+        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
         pdf.setTextColor(180, 180, 180);
         pdf.setFont('helvetica', 'normal');
-        pdf.text('—', lx + 9, ly - 1, { align: 'center' });
+        pdf.text('—', lx + 9, ly2 - 1, { align: 'center' });
         pdf.setTextColor(80, 80, 80);
-        pdf.text('Off', lx + 22, ly);
+        pdf.text('Off', lx + 22, ly2);
         lx += pdf.getTextWidth('Off') + 32;
 
         pdf.setTextColor(100, 100, 100);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('*', lx + 2, ly);
+        pdf.text('*', lx + 2, ly2);
         pdf.setTextColor(80, 80, 80);
         pdf.setFont('helvetica', 'normal');
-        pdf.text('= covers 2nd half (partial PTO)', lx + 9, ly);
+        pdf.text('= covers 2nd half (partial PTO)', lx + 9, ly2);
       };
 
       // Footer renderer
@@ -434,7 +437,7 @@ export default function MonthGrid() {
         }
 
         autoTable(pdf, {
-          startY: 56,
+          startY: 70,
           margin: { left: margin, right: margin },
           head: [head],
           body,
