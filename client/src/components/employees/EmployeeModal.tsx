@@ -1067,15 +1067,15 @@ function StationsTab({ employee, onClose }: { employee: Employee; onClose: () =>
               })}
           </div>
           {!isExact && (
-            <p className="text-xs text-gray-400 mt-1.5">
-              Values will be proportionally scaled to 100% on save.
+            <p className="text-xs text-red-500 mt-1.5">
+              Total must equal 100% before saving.
             </p>
           )}
         </div>
       )}
 
       <div className="pt-1">
-        <button onClick={handleSave} disabled={saveMutation.isPending || selectedCount === 0}
+        <button onClick={handleSave} disabled={saveMutation.isPending || selectedCount === 0 || !isExact}
           className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
           {saveMutation.isPending ? 'Saving...' : 'Save Preferences'}
         </button>
