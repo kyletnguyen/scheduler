@@ -2004,22 +2004,17 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         gapFill(pool, locked, stationMap, shiftName);
 
         // ── Partial PTO coverage: stations with a partial-day employee need a second person ──
-        // If someone at a station has partial PTO, place an additional qualified
-        // employee there so the station is covered for the full shift.
-        // Uses _origSet to bypass max-staff caps — this is an explicit override
-        // because the partial-PTO employee is only there for part of the shift.
+        // Uses _origSet to bypass max-staff caps — the partial-PTO employee is only
+        // there for part of the shift so the station needs two people.
         {
           const date = group[0].date;
           for (const station of realStations) {
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
             const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
             if (partialEmps.length === 0) continue;
-            // Check if there's already a full-day person covering this station
             const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
             if (fullDayCovers.length > 0) continue; // already covered
 
-            // Need a backup — bypass normal caps via _origSet since this is a
-            // partial-day override (two people share the station across the shift).
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
 
@@ -2035,7 +2030,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             if (filled) continue;
 
-            // Strategy 2: pull from an overstaffed station
+            // Strategy 2: pull from an overstaffed station (above min)
             for (const otherStation of realStations) {
               if (otherStation.id === station.id) continue;
               const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
@@ -2053,16 +2048,61 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             if (filled) continue;
 
-            // Strategy 3: pull an admin/supervisor from Admin station
-            if (adminStation) {
-              const adminAssignees = [...stationMap.entries()].filter(([, sid]) => sid === adminStation.id);
-              for (const [eid] of adminAssignees) {
-                if (!isQualified(eid)) continue;
-                stationMap.delete(eid);
-                _origSet(eid, station.id);
-                filled = true;
-                break;
+            // Strategy 3: pull an admin/supervisor from ANY station (they may have
+            // been moved from Admin to a bench station by gapFill)
+            // Prefer admins currently at Admin station, then admins at bench stations.
+            const allAdmins = [...stationMap.entries()]
+              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
+              .sort(([, sidA], [, sidB]) => {
+                // Admin station first, then bench
+                const aIsAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
+                const bIsAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
+                return aIsAdmin - bIsAdmin;
+              });
+            for (const [eid] of allAdmins) {
+              stationMap.delete(eid);
+              _origSet(eid, station.id);
+              filled = true;
+              break;
+            }
+            if (filled) continue;
+
+            // Strategy 4: chain swap — move a qualified CLS from another station
+            // to cover here, and backfill their station with an admin.
+            for (const otherStation of realStations) {
+              if (otherStation.id === station.id) continue;
+              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
+
+              for (const [clsEid] of otherAssignees) {
+                if (!isQualified(clsEid)) continue;
+                if (empRoleMap.get(clsEid) === 'mlt') continue; // don't move MLTs
+
+                // Would removing this CLS understaff the other station?
+                if (otherAssignees.length - 1 < getMinStaff(otherStation, shiftName)) {
+                  // Find an admin anywhere who can backfill the other station
+                  const backfillAdmin = [...stationMap.entries()].find(([eid, sid]) =>
+                    eid !== clsEid
+                    && empRoleMap.get(eid) === 'admin'
+                    && (empStationMap.get(eid) ?? []).includes(otherStation.id)
+                  );
+                  if (backfillAdmin) {
+                    const [adminEid] = backfillAdmin;
+                    stationMap.delete(adminEid);
+                    stationMap.delete(clsEid);
+                    _origSet(adminEid, otherStation.id);
+                    _origSet(clsEid, station.id);
+                    filled = true;
+                    break;
+                  }
+                } else {
+                  // Other station can afford to lose one
+                  stationMap.delete(clsEid);
+                  _origSet(clsEid, station.id);
+                  filled = true;
+                  break;
+                }
               }
+              if (filled) break;
             }
           }
         }
