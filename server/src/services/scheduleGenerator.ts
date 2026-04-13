@@ -2059,9 +2059,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
             // Strategy 3: pull an admin/supervisor from ANY station
             const allAdmins = [...stationMap.entries()]
-              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid));
+              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
               .sort(([, sidA], [, sidB]) => {
-                // Admin station first, then bench
                 const aIsAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
                 const bIsAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
                 return aIsAdmin - bIsAdmin;
