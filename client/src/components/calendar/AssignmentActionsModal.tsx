@@ -101,9 +101,10 @@ export default function AssignmentActionsModal({
               </button>
               {(() => {
                 const swappable = sameShiftAssignments.filter(({ employee: o }) => {
-                  if (employee.role === 'mlt') return o.role === 'mlt';
-                  if (o.role === 'mlt') return employee.role === 'mlt';
-                  return true;
+                  // No one swaps with admin
+                  if (employee.role === 'admin' || o.role === 'admin') return false;
+                  // MLT only swaps with MLT, CLS only with CLS
+                  return employee.role === o.role;
                 });
                 return (
                   <button
@@ -174,13 +175,9 @@ export default function AssignmentActionsModal({
               <div className="space-y-1">
                 {sameShiftAssignments
                 .filter(({ employee: otherEmp }) => {
-                  // Only show same-role swaps: MLT↔MLT, CLS↔CLS, Admin↔CLS
-                  const myRole = employee.role;
-                  const theirRole = otherEmp.role;
-                  if (myRole === 'mlt') return theirRole === 'mlt';
-                  if (theirRole === 'mlt') return myRole === 'mlt';
-                  // CLS and admin can swap with each other
-                  return true;
+                  // No one swaps with admin; MLT↔MLT, CLS↔CLS only
+                  if (employee.role === 'admin' || otherEmp.role === 'admin') return false;
+                  return employee.role === otherEmp.role;
                 })
                 .map(({ assignment: other, employee: otherEmp }) => {
                   const otherStation = other.station_name ? getStationDisplay(other.station_name) : null;
