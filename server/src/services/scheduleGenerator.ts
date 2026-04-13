@@ -2006,125 +2006,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         // Run gap-fill last — after everyone is placed, reshuffle to fix remaining understaffing
         gapFill(pool, locked, stationMap, shiftName);
 
-        // ── Partial PTO coverage: stations with a partial-day employee need a second person ──
-        // Uses _origSet to bypass max-staff caps — the partial-PTO employee is only
-        // there for part of the shift so the station needs two people.
-        {
-          const date = group[0].date;
-          for (const station of realStations) {
-            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
-            const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
-            if (partialEmps.length === 0) continue;
-            const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
-            if (fullDayCovers.length > 0) continue; // already covered
-
-            const isQualified = (eid: number) =>
-              (empStationMap.get(eid) ?? []).includes(station.id);
-
-            let filled = false;
-
-            // Strategy 1: unassigned employee qualified for this station
-            for (const a of pool) {
-              if (stationMap.has(a.employee_id)) continue;
-              if (!isQualified(a.employee_id)) continue;
-              _origSet(a.employee_id, station.id);
-              filled = true;
-              break;
-            }
-            if (filled) continue;
-
-            // Strategy 2: pull from an overstaffed station (above min)
-            for (const otherStation of realStations) {
-              if (otherStation.id === station.id) continue;
-              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
-              const otherMin = getMinStaff(otherStation, shiftName);
-              if (otherAssignees.length <= otherMin) continue;
-
-              for (const [eid] of otherAssignees) {
-                if (!isQualified(eid)) continue;
-                stationMap.delete(eid);
-                _origSet(eid, station.id);
-                filled = true;
-                break;
-              }
-              if (filled) break;
-            }
-            if (filled) continue;
-
-            // Strategy 3: pull an admin/supervisor from ANY station
-            const allAdmins = [...stationMap.entries()]
-              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
-              .sort(([, sidA], [, sidB]) => {
-                const aIsAdmin = adminStation && sidA === adminStation.id ? 0 : 1;
-                const bIsAdmin = adminStation && sidB === adminStation.id ? 0 : 1;
-                return aIsAdmin - bIsAdmin;
-              });
-            for (const [eid] of allAdmins) {
-              stationMap.delete(eid);
-              _origSet(eid, station.id);
-              filled = true;
-              break;
-            }
-            if (filled) continue;
-
-            // Strategy 4: chain swap — move a qualified CLS from another station
-            // to cover here, and backfill their station with an admin.
-            for (const otherStation of realStations) {
-              if (otherStation.id === station.id) continue;
-              const otherAssignees = [...stationMap.entries()].filter(([, sid]) => sid === otherStation.id);
-
-              for (const [clsEid] of otherAssignees) {
-                if (!isQualified(clsEid)) continue;
-                if (empRoleMap.get(clsEid) === 'mlt') continue; // don't move MLTs
-
-                // Would removing this CLS understaff the other station?
-                if (otherAssignees.length - 1 < getMinStaff(otherStation, shiftName)) {
-                  // Find an admin anywhere who can backfill the other station
-                  const backfillAdmin = [...stationMap.entries()].find(([eid, sid]) =>
-                    eid !== clsEid
-                    && empRoleMap.get(eid) === 'admin'
-                    && (empStationMap.get(eid) ?? []).includes(otherStation.id)
-                  );
-                  if (backfillAdmin) {
-                    const [adminEid] = backfillAdmin;
-                    stationMap.delete(adminEid);
-                    stationMap.delete(clsEid);
-                    _origSet(adminEid, otherStation.id);
-                    _origSet(clsEid, station.id);
-                    filled = true;
-                    break;
-                  }
-                } else {
-                  // Other station can afford to lose one
-                  stationMap.delete(clsEid);
-                  _origSet(clsEid, station.id);
-                  filled = true;
-                  break;
-                }
-              }
-              if (filled) break;
-            }
-          }
-        }
-
-        // ── Compute stations with partial PTO that need +1 staff ──
-        // Used by the repair pass to avoid undoing partial PTO coverage.
-        const partialPTOStationIds = new Set<number>();
-        {
-          const date = group[0].date;
-          for (const station of realStations) {
-            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
-            const hasPartial = stationAssignees.some(([eid]) => partialPTOSet.has(`${eid}-${date}`));
-            const hasFullDay = stationAssignees.some(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
-            if (hasPartial && hasFullDay) partialPTOStationIds.add(station.id);
-          }
-        }
-        // Effective min staff: +1 for stations with partial PTO coverage
-        const getEffectiveMin = (station: Station, sName: string) => {
-          const base = getMinStaff(station, sName);
-          return partialPTOStationIds.has(station.id) ? base + 1 : base;
-        };
-
         // ── Repair pass: validate and fix by swapping ──
         // Runs iteratively until no more improvements can be made
         for (let repairIter = 0; repairIter < 10; repairIter++) {
@@ -2158,14 +2039,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           for (const station of realStations) {
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
             const current = stationAssignees.length;
-            const effectiveMin = getEffectiveMin(station, shiftName);
-            if (current <= effectiveMin) continue; // not overstaffed (respects partial PTO +1)
+            const minNeeded = getMinStaff(station, shiftName);
+            if (current <= minNeeded) continue; // not overstaffed
 
             // Find employees we can move to understaffed stations
             for (const [eid] of stationAssignees) {
               // Re-check current count (may have changed from prior moves)
               const nowCount = [...stationMap.values()].filter(v => v === station.id).length;
-              if (nowCount <= effectiveMin) break; // no longer overstaffed
+              if (nowCount <= minNeeded) break; // no longer overstaffed
 
               const quals = (empStationMap.get(eid) ?? []).filter(sid =>
                 !adminStation || sid !== adminStation.id
@@ -2553,6 +2434,96 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           }
 
           if (!changed) break;
+        }
+
+        // ── Partial PTO coverage (runs LAST — after repair pass so nothing undoes it) ──
+        // If a station's only employee has partial PTO, place a second person there
+        // via _origSet (bypasses max-staff caps since one person leaves mid-shift).
+        {
+          const date = group[0].date;
+          for (const station of realStations) {
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
+            if (partialEmps.length === 0) continue;
+            const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
+            if (fullDayCovers.length > 0) continue;
+
+            const isQualified = (eid: number) =>
+              (empStationMap.get(eid) ?? []).includes(station.id);
+            let filled = false;
+
+            // S1: unassigned employee
+            for (const a of pool) {
+              if (stationMap.has(a.employee_id)) continue;
+              if (!isQualified(a.employee_id)) continue;
+              _origSet(a.employee_id, station.id);
+              filled = true;
+              break;
+            }
+            if (filled) continue;
+
+            // S2: pull from overstaffed station
+            for (const os of realStations) {
+              if (os.id === station.id) continue;
+              const osAssignees = [...stationMap.entries()].filter(([, sid]) => sid === os.id);
+              if (osAssignees.length <= getMinStaff(os, shiftName)) continue;
+              for (const [eid] of osAssignees) {
+                if (!isQualified(eid)) continue;
+                stationMap.delete(eid);
+                _origSet(eid, station.id);
+                filled = true;
+                break;
+              }
+              if (filled) break;
+            }
+            if (filled) continue;
+
+            // S3: pull admin from ANY station (prefer Admin desk first)
+            const admins = [...stationMap.entries()]
+              .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
+              .sort(([, a], [, b]) => {
+                const aAdmin = adminStation && a === adminStation.id ? 0 : 1;
+                const bAdmin = adminStation && b === adminStation.id ? 0 : 1;
+                return aAdmin - bAdmin;
+              });
+            for (const [eid] of admins) {
+              stationMap.delete(eid);
+              _origSet(eid, station.id);
+              filled = true;
+              break;
+            }
+            if (filled) continue;
+
+            // S4: chain swap — CLS covers here, admin backfills their station
+            for (const os of realStations) {
+              if (os.id === station.id) continue;
+              const osAssignees = [...stationMap.entries()].filter(([, sid]) => sid === os.id);
+              for (const [clsEid] of osAssignees) {
+                if (!isQualified(clsEid)) continue;
+                if (empRoleMap.get(clsEid) === 'mlt') continue;
+                if (osAssignees.length - 1 < getMinStaff(os, shiftName)) {
+                  const bf = [...stationMap.entries()].find(([eid]) =>
+                    eid !== clsEid && empRoleMap.get(eid) === 'admin'
+                    && (empStationMap.get(eid) ?? []).includes(os.id)
+                  );
+                  if (bf) {
+                    stationMap.delete(bf[0]);
+                    stationMap.delete(clsEid);
+                    _origSet(bf[0], os.id);
+                    _origSet(clsEid, station.id);
+                    filled = true;
+                    break;
+                  }
+                } else {
+                  stationMap.delete(clsEid);
+                  _origSet(clsEid, station.id);
+                  filled = true;
+                  break;
+                }
+              }
+              if (filled) break;
+            }
+          }
         }
 
         // Apply station assignments to the result assignments
