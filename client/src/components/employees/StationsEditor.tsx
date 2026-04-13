@@ -65,7 +65,7 @@ export default function StationsEditor({ employee, onClose }: Props) {
         return station ? { station, weight } : null;
       })
       .filter((x): x is { station: typeof allStations[0]; weight: number } => x !== null)
-      .sort((a, b) => b.weight - a.weight);
+      .sort((a, b) => a.station.name.localeCompare(b.station.name));
   }, [weights, allStations]);
 
   return (
