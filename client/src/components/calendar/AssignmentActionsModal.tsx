@@ -99,18 +99,27 @@ export default function AssignmentActionsModal({
                 <div className="text-sm font-medium text-gray-800">Change station</div>
                 <div className="text-xs text-gray-500">Move to a different station</div>
               </button>
-              <button
-                onClick={() => setMode('swap')}
-                disabled={sameShiftAssignments.length === 0}
-                className="w-full text-left px-3 py-2.5 rounded-lg border border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:bg-transparent"
-              >
-                <div className="text-sm font-medium text-gray-800">Swap with another employee</div>
-                <div className="text-xs text-gray-500">
-                  {sameShiftAssignments.length === 0
-                    ? 'No other employees on this shift'
-                    : `Swap stations with another ${assignment.shift_name} employee`}
-                </div>
-              </button>
+              {(() => {
+                const swappable = sameShiftAssignments.filter(({ employee: o }) => {
+                  if (employee.role === 'mlt') return o.role === 'mlt';
+                  if (o.role === 'mlt') return employee.role === 'mlt';
+                  return true;
+                });
+                return (
+                  <button
+                    onClick={() => setMode('swap')}
+                    disabled={swappable.length === 0}
+                    className="w-full text-left px-3 py-2.5 rounded-lg border border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:bg-transparent"
+                  >
+                    <div className="text-sm font-medium text-gray-800">Swap with another employee</div>
+                    <div className="text-xs text-gray-500">
+                      {swappable.length === 0
+                        ? 'No same-role employees to swap with'
+                        : `Swap stations with another ${assignment.shift_name} employee`}
+                    </div>
+                  </button>
+                );
+              })()}
               <button
                 onClick={onRemove}
                 className="w-full text-left px-3 py-2.5 rounded-lg border border-gray-200 hover:border-red-400 hover:bg-red-50 transition-colors"
@@ -163,7 +172,17 @@ export default function AssignmentActionsModal({
             <div>
               <div className="text-xs font-medium text-gray-600 mb-2 uppercase tracking-wide">Swap stations with</div>
               <div className="space-y-1">
-                {sameShiftAssignments.map(({ assignment: other, employee: otherEmp }) => {
+                {sameShiftAssignments
+                .filter(({ employee: otherEmp }) => {
+                  // Only show same-role swaps: MLT↔MLT, CLS↔CLS, Admin↔CLS
+                  const myRole = employee.role;
+                  const theirRole = otherEmp.role;
+                  if (myRole === 'mlt') return theirRole === 'mlt';
+                  if (theirRole === 'mlt') return myRole === 'mlt';
+                  // CLS and admin can swap with each other
+                  return true;
+                })
+                .map(({ assignment: other, employee: otherEmp }) => {
                   const otherStation = other.station_name ? getStationDisplay(other.station_name) : null;
                   return (
                     <button
