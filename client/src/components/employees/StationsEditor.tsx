@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import { useStations, useSaveEmployeeStations } from '../../hooks/useStations';
 import type { Employee } from '../../types';
 import { buildStationStyleMap } from '../../utils/stationStyles';
@@ -8,6 +8,99 @@ interface Props {
   employee: Employee;
   onClose: () => void;
 }
+
+/** Individual slider row — manages its own local value while dragging so the
+ *  parent list doesn't re-render on every pixel of movement. */
+const StationSlider = React.memo(function StationSlider({
+  stationId,
+  stationName,
+  color,
+  abbr,
+  weight,
+  share,
+  onCommit,
+}: {
+  stationId: number;
+  stationName: string;
+  color: string;
+  abbr: string | undefined;
+  weight: number;
+  share: number;
+  onCommit: (id: number, value: number) => void;
+}) {
+  const [localValue, setLocalValue] = useState(weight);
+  const dragging = useRef(false);
+
+  // Sync from parent when not actively dragging
+  const prevWeight = useRef(weight);
+  if (weight !== prevWeight.current && !dragging.current) {
+    prevWeight.current = weight;
+    setLocalValue(weight);
+  }
+
+  const localShare = share; // parent-computed share based on committed weights
+  const displayWeight = dragging.current ? localValue : weight;
+  const displayFill = dragging.current ? localValue : weight;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          {abbr && (
+            <span
+              className="w-6 h-4 rounded text-[9px] font-bold flex items-center justify-center text-white shrink-0"
+              style={{ backgroundColor: color }}
+            >
+              {abbr}
+            </span>
+          )}
+          <span className="text-xs font-medium text-gray-800">{stationName}</span>
+        </div>
+        <div className="flex items-center gap-3 text-[10px] tabular-nums">
+          <span className="text-gray-500">
+            wt <span className="font-semibold text-gray-800">{displayWeight}</span>
+          </span>
+          <span
+            className="font-semibold px-1.5 py-0.5 rounded text-white min-w-[36px] text-center"
+            style={{ backgroundColor: color }}
+          >
+            {localShare}%
+          </span>
+        </div>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={displayWeight}
+        onPointerDown={() => { dragging.current = true; }}
+        onPointerUp={() => {
+          dragging.current = false;
+          onCommit(stationId, localValue);
+        }}
+        onLostPointerCapture={() => {
+          if (dragging.current) {
+            dragging.current = false;
+            onCommit(stationId, localValue);
+          }
+        }}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          setLocalValue(v);
+          if (!dragging.current) {
+            // Keyboard / accessibility change — commit immediately
+            onCommit(stationId, v);
+          }
+        }}
+        className="station-slider"
+        style={{
+          '--track-color': color,
+          '--fill-pct': `${displayFill}%`,
+        } as React.CSSProperties}
+      />
+    </div>
+  );
+});
 
 export default function StationsEditor({ employee, onClose }: Props) {
   const { data: allStations = [] } = useStations();
@@ -34,11 +127,13 @@ export default function StationsEditor({ employee, onClose }: Props) {
     setWeights(next);
   };
 
-  const setWeight = (id: number, value: number) => {
-    const next = new Map(weights);
-    next.set(id, value);
-    setWeights(next);
-  };
+  const commitWeight = useCallback((id: number, value: number) => {
+    setWeights(prev => {
+      const next = new Map(prev);
+      next.set(id, value);
+      return next;
+    });
+  }, []);
 
   const totalWeight = useMemo(() => {
     let sum = 0;
@@ -57,16 +152,16 @@ export default function StationsEditor({ employee, onClose }: Props) {
     );
   };
 
-  // Sort selected stations by weight descending for display
-  const selectedOrdered = useMemo(() => {
-    return [...weights.entries()]
-      .map(([id, weight]) => {
-        const station = allStations.find(s => s.id === id);
-        return station ? { station, weight } : null;
-      })
-      .filter((x): x is { station: typeof allStations[0]; weight: number } => x !== null)
-      .sort((a, b) => a.station.name.localeCompare(b.station.name));
-  }, [weights, allStations]);
+  // Stable list of selected stations — sorted alphabetically, only changes
+  // when stations are added/removed (not when weights change).
+  const selectedStations = useMemo(() => {
+    return [...weights.keys()]
+      .map(id => allStations.find(s => s.id === id))
+      .filter((s): s is typeof allStations[0] => s != null)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [weights.size, ...([...weights.keys()].sort()), allStations]);
+  // ^ Deps: re-compute when station set changes, not on every weight tweak.
+  //   Spreading sorted keys ensures add/remove triggers recalc but value changes don't.
 
   return (
     <td colSpan={5} className="px-0 py-0">
@@ -107,51 +202,24 @@ export default function StationsEditor({ employee, onClose }: Props) {
         </div>
 
         {/* Sliders for selected stations */}
-        {selectedOrdered.length > 0 && (
+        {selectedStations.length > 0 && (
           <div className="space-y-1.5 mb-3">
-            {selectedOrdered.map(({ station, weight }) => {
+            {selectedStations.map((station) => {
               const style = stationStyleMap[station.name];
-              const share = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
               const color = style?.color ?? '#16a34a';
+              const weight = weights.get(station.id) ?? 50;
+              const share = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
               return (
-                <div key={station.id} className="bg-white rounded-lg border border-gray-200 px-3 py-2">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-2">
-                      {style && (
-                        <span
-                          className="w-6 h-4 rounded text-[9px] font-bold flex items-center justify-center text-white shrink-0"
-                          style={{ backgroundColor: color }}
-                        >
-                          {style.abbr}
-                        </span>
-                      )}
-                      <span className="text-xs font-medium text-gray-800">{station.name}</span>
-                    </div>
-                    <div className="flex items-center gap-3 text-[10px] tabular-nums">
-                      <span className="text-gray-500">
-                        wt <span className="font-semibold text-gray-800">{weight}</span>
-                      </span>
-                      <span
-                        className="font-semibold px-1.5 py-0.5 rounded text-white min-w-[36px] text-center"
-                        style={{ backgroundColor: color }}
-                      >
-                        {share}%
-                      </span>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={weight}
-                    onChange={(e) => setWeight(station.id, Number(e.target.value))}
-                    className="station-slider"
-                    style={{
-                      '--track-color': color,
-                      '--fill-pct': `${weight}%`,
-                    } as React.CSSProperties}
-                  />
-                </div>
+                <StationSlider
+                  key={station.id}
+                  stationId={station.id}
+                  stationName={station.name}
+                  color={color}
+                  abbr={style?.abbr}
+                  weight={weight}
+                  share={share}
+                  onCommit={commitWeight}
+                />
               );
             })}
           </div>
