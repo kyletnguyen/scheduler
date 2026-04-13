@@ -325,7 +325,7 @@ export default function MonthGrid() {
         drawLegend();
 
         // Build table data for this shift group + cross-shift guests
-        const cellData: Map<string, { shiftName: string; stationName: string | null; isCrossShift: boolean }> = new Map();
+        const cellData: Map<string, { shiftName: string; stationName: string | null; isCrossShift: boolean; isCoveringPTO?: boolean }> = new Map();
         const body: string[][] = [];
         const guestRowIndices = new Set<number>();
 
@@ -347,9 +347,24 @@ export default function MonthGrid() {
               const isCrossShift = emp.default_shift !== 'floater' && assignment.shift_name.toLowerCase() !== emp.default_shift;
               const icon = SHIFT_ICONS[assignment.shift_name];
               const stationDisplay = assignment.station_name ? getStationDisplay(assignment.station_name) : null;
-              // Cross-shift: show shift badge (AM/PM/NS) instead of station — matches web view
+
+              // Check if covering partial PTO — same logic as web view
+              const homeStationName = emp.role === 'admin' ? 'Admin'
+                : emp.stations?.[0]?.name ?? null;
+              const isAtHomeStation = homeStationName === assignment.station_name;
+              const hasPTOCoworker = assignment.station_id != null && assignments.some(other =>
+                other.id !== assignment.id
+                && other.date === dateStr
+                && other.station_id === assignment.station_id
+                && timeOffIndex.get(other.employee_id)?.get(dateStr) === 'custom'
+              );
+              const isCoveringPTO = hasPTOCoworker && !isAtHomeStation;
+
               if (isCrossShift && icon) {
                 cells.push(icon.label);
+              } else if (stationDisplay && isCoveringPTO && homeStationName) {
+                const homeDisplay = getStationDisplay(homeStationName);
+                cells.push(`${homeDisplay.abbr}→${stationDisplay.abbr}`);
               } else {
                 cells.push(stationDisplay ? stationDisplay.abbr : (icon ? icon.label : assignment.shift_name.charAt(0)));
               }
@@ -357,6 +372,7 @@ export default function MonthGrid() {
                 shiftName: assignment.shift_name,
                 stationName: assignment.station_name ?? null,
                 isCrossShift,
+                isCoveringPTO,
               });
             } else {
               cells.push('—');
@@ -493,8 +509,10 @@ export default function MonthGrid() {
             const cellW = data.cell.width;
             const cellH = data.cell.height;
 
-            // Badge dimensions — centered in cell like the web view
-            const badgeW = Math.min(cellW - 4, 20);
+            const cd = cellData.get(`${ri}-${dayIdx}`);
+            // Wider badge for split-duty labels (e.g. AD→BB)
+            const isWide = text.includes('→');
+            const badgeW = Math.min(cellW - 4, isWide ? 32 : 20);
             const badgeH = Math.min(cellH - 6, 14);
             const badgeX = cellX + (cellW - badgeW) / 2;
             const badgeY = cellY + (cellH - badgeH) / 2;
@@ -507,14 +525,11 @@ export default function MonthGrid() {
               bgColor = [254, 202, 202];
               textColor = [185, 28, 28];
             } else if (text === '½' || text.endsWith('/2')) {
-              // Partial PTO — red-ish like PTO but distinguishable
               bgColor = [254, 178, 178];
               textColor = [153, 27, 27];
             } else {
-              const cd = cellData.get(`${ri}-${dayIdx}`);
               if (cd) {
                 if (cd.isCrossShift) {
-                  // Cross-shift: always use shift color (matches web view)
                   const icon = SHIFT_ICONS[cd.shiftName];
                   if (icon) bgColor = [...icon.rgb] as [number, number, number];
                 } else if (cd.stationName) {
