@@ -1,7 +1,7 @@
 {
   "name": "shift-scheduler",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Lab Shift Scheduler",
   "main": "electron/main.cjs",
   "workspaces": [
@@ -9,7 +9,7 @@
     "server"
   ],
   "scripts": {
-    "dev": "\"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
     "build": "npm run build -w client && npm run build -w server",
     "build:copy-migrations": "node -e \"const fs=require('fs'),p='server/dist/db/migrations';if(fs.existsSync(p))fs.rmSync(p,{recursive:true});fs.cpSync('server/src/db/migrations',p,{recursive:true})\"",
     "build:all": "npm run build && npm run build:copy-migrations",
