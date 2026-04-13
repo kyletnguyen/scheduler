@@ -1152,8 +1152,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           }
         }
 
-        // Overstaffed check applies to all shifts
-        if (stationAssignees.length > getMaxStaff(station, shiftName)) criticals += 10;
+        // Overstaffed check applies to all shifts — skip for partial PTO coverage
+        // where the extra person is intentionally covering the departing employee
+        const dateStr = group[0].date;
+        const hasPartialPTOHere = stationAssignees.some(a => partialPTOSet.has(`${a.employee_id}-${dateStr}`));
+        if (stationAssignees.length > getMaxStaff(station, shiftName) && !hasPartialPTOHere) criticals += 10;
       }
     }
 
@@ -2015,11 +2018,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const fullDayCovers = stationAssignees.filter(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
             if (fullDayCovers.length > 0) continue; // already covered
 
-            // DEBUG — remove after confirming fix works
-            const partialNames = partialEmps.map(([eid]) => employees.find(e => e.id === eid)?.name).join(', ');
-            console.log(`[PTO-COVER] ${date} ${station.name}: ${partialNames} has partial PTO, seeking backup...`);
-            console.log(`[PTO-COVER]   pool unassigned: ${pool.filter(a => !stationMap.has(a.employee_id)).length}`);
-
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
 
@@ -2034,8 +2032,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               break;
             }
             if (filled) continue;
-
-            console.log(`[PTO-COVER]   Strategy 1 (unassigned): no luck`);
 
             // Strategy 2: pull from an overstaffed station (above min)
             for (const otherStation of realStations) {
@@ -2055,8 +2051,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
             if (filled) continue;
 
-            console.log(`[PTO-COVER]   Strategy 2 (overstaffed): no luck`);
-
             // Strategy 3: pull an admin/supervisor from ANY station
             const allAdmins = [...stationMap.entries()]
               .filter(([eid]) => empRoleMap.get(eid) === 'admin' && isQualified(eid))
@@ -2072,18 +2066,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               break;
             }
             if (filled) continue;
-            // Log all admins found and their qualifications
-            const allAdminsDebug = [...stationMap.entries()]
-              .filter(([eid]) => empRoleMap.get(eid) === 'admin')
-              .map(([eid, sid]) => {
-                const name = employees.find(e => e.id === eid)?.name;
-                const quals = empStationMap.get(eid) ?? [];
-                const qualNames = quals.map(q => realStations.find(s => s.id === q)?.name ?? `#${q}`);
-                const atStation = [...stationMap.entries()].find(([e]) => e === eid)?.[1];
-                const atName = stations.find(s => s.id === atStation)?.name ?? `#${atStation}`;
-                return `${name}(at ${atName}, quals=[${qualNames.join(',')}], qualForTarget=${isQualified(eid)})`;
-              });
-            console.log(`[PTO-COVER]   Strategy 3 (admin): found ${allAdmins.length} qualified admins of ${allAdminsDebug.length} total: ${allAdminsDebug.join('; ')}`);
 
             // Strategy 4: chain swap — move a qualified CLS from another station
             // to cover here, and backfill their station with an admin.
@@ -2121,9 +2103,6 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
                 }
               }
               if (filled) break;
-            }
-            if (!filled) {
-              console.log(`[PTO-COVER]   Strategy 4 (chain swap): no luck — NO BACKUP FOUND for ${station.name} on ${date}`);
             }
           }
         }
