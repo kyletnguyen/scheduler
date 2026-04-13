@@ -27,13 +27,12 @@ const StationSlider = React.memo(function StationSlider({
   share: number;
   onCommit: (id: number, value: number) => void;
 }) {
-  // Local value drives the slider + display while the user is actively dragging.
-  // On release we push the final value to the parent.
   const [localValue, setLocalValue] = useState(committedWeight);
+  const [editing, setEditing] = useState(false);
+  const [inputText, setInputText] = useState('');
   const dragging = useRef(false);
 
-  // If the parent changes the weight externally (e.g. station toggled off/on),
-  // sync local value — but only when we're not mid-drag.
+  // Sync from parent when not actively dragging
   const prevCommitted = useRef(committedWeight);
   if (committedWeight !== prevCommitted.current && !dragging.current) {
     prevCommitted.current = committedWeight;
@@ -41,6 +40,16 @@ const StationSlider = React.memo(function StationSlider({
   }
 
   const display = dragging.current ? localValue : committedWeight;
+
+  const commitInput = () => {
+    const parsed = parseInt(inputText, 10);
+    if (!isNaN(parsed)) {
+      const clamped = Math.max(0, Math.min(100, parsed));
+      setLocalValue(clamped);
+      onCommit(stationId, clamped);
+    }
+    setEditing(false);
+  };
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
@@ -57,9 +66,33 @@ const StationSlider = React.memo(function StationSlider({
           <span className="text-xs font-medium text-gray-800">{stationName}</span>
         </div>
         <div className="flex items-center gap-3 text-[10px] tabular-nums">
-          <span className="text-gray-500 w-[42px]">
-            wt <span className="font-semibold text-gray-800">{display}</span>
-          </span>
+          {editing ? (
+            <div className="flex items-center gap-0.5">
+              <span className="text-gray-500">wt</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                autoFocus
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onBlur={commitInput}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitInput();
+                  if (e.key === 'Escape') setEditing(false);
+                }}
+                className="w-[40px] text-right text-[10px] font-semibold text-gray-800 border border-gray-300 rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-green-400"
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => { setInputText(String(display)); setEditing(true); }}
+              className="text-gray-500 hover:text-green-600 cursor-text w-[42px]"
+              title="Click to type a value"
+            >
+              wt <span className="font-semibold text-gray-800">{display}</span>
+            </button>
+          )}
           <span
             className="font-semibold px-1.5 py-0.5 rounded text-white min-w-[36px] text-center"
             style={{ backgroundColor: color }}
@@ -88,7 +121,6 @@ const StationSlider = React.memo(function StationSlider({
           const v = Number(e.target.value);
           setLocalValue(v);
           if (!dragging.current) {
-            // Keyboard / accessibility — commit immediately
             onCommit(stationId, v);
           }
         }}

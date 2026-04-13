@@ -837,6 +837,8 @@ const PercentSlider = React.memo(function PercentSlider({
   onCommit: (id: number, value: number) => void;
 }) {
   const [localValue, setLocalValue] = useState(pct);
+  const [editing, setEditing] = useState(false);
+  const [inputText, setInputText] = useState('');
   const dragging = useRef(false);
 
   // Sync from parent when not actively dragging
@@ -847,6 +849,16 @@ const PercentSlider = React.memo(function PercentSlider({
   }
 
   const display = dragging.current ? localValue : pct;
+
+  const commitInput = () => {
+    const parsed = parseInt(inputText, 10);
+    if (!isNaN(parsed)) {
+      const clamped = Math.max(0, Math.min(100, parsed));
+      setLocalValue(clamped);
+      onCommit(stationId, clamped);
+    }
+    setEditing(false);
+  };
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 px-4 py-3">
@@ -862,7 +874,33 @@ const PercentSlider = React.memo(function PercentSlider({
           )}
           <span className="text-sm font-medium text-gray-800">{stationName}</span>
         </div>
-        <span className="text-base font-bold text-gray-800 tabular-nums w-[48px] text-right">{display}%</span>
+        {editing ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              autoFocus
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onBlur={commitInput}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitInput();
+                if (e.key === 'Escape') setEditing(false);
+              }}
+              className="w-[52px] text-right text-base font-bold text-gray-800 tabular-nums border border-gray-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-green-400"
+            />
+            <span className="text-base font-bold text-gray-400">%</span>
+          </div>
+        ) : (
+          <button
+            onClick={() => { setInputText(String(display)); setEditing(true); }}
+            className="text-base font-bold text-gray-800 tabular-nums w-[48px] text-right hover:text-green-600 cursor-text"
+            title="Click to type a value"
+          >
+            {display}%
+          </button>
+        )}
       </div>
       <input
         type="range"
