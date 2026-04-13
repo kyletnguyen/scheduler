@@ -777,46 +777,6 @@ function normalizeToPercents(raw: Map<number, number>): Map<number, number> {
   return out;
 }
 
-// Redistribute: user dragged `changedId` to `newValue`.
-// Keep the changed station at newValue and adjust the others proportionally so sum = 100.
-function redistribute(current: Map<number, number>, changedId: number, newValue: number): Map<number, number> {
-  const clamped = Math.max(0, Math.min(100, Math.round(newValue)));
-  if (current.size === 1) {
-    const out = new Map<number, number>();
-    out.set(changedId, 100);
-    return out;
-  }
-  const others = [...current.entries()].filter(([id]) => id !== changedId);
-  const remaining = 100 - clamped;
-  const othersTotal = others.reduce((a, [, v]) => a + v, 0);
-
-  const out = new Map<number, number>();
-  out.set(changedId, clamped);
-
-  if (othersTotal === 0) {
-    // Split remaining evenly among the others
-    const each = Math.floor(remaining / others.length);
-    let leftover = remaining - each * others.length;
-    for (const [id] of others) {
-      out.set(id, each + (leftover > 0 ? 1 : 0));
-      if (leftover > 0) leftover--;
-    }
-  } else {
-    // Scale others proportionally to their current values
-    const scaled: { id: number; exact: number; floor: number }[] = others.map(([id, v]) => {
-      const exact = (v / othersTotal) * remaining;
-      return { id, exact, floor: Math.floor(exact) };
-    });
-    const floorSum = scaled.reduce((a, b) => a + b.floor, 0);
-    let leftover = remaining - floorSum;
-    scaled.sort((a, b) => (b.exact - b.floor) - (a.exact - a.floor));
-    for (const item of scaled) {
-      out.set(item.id, item.floor + (leftover > 0 ? 1 : 0));
-      if (leftover > 0) leftover--;
-    }
-  }
-  return out;
-}
 
 /** Individual percentage slider — owns its value during drag to prevent parent re-renders. */
 const PercentSlider = React.memo(function PercentSlider({
