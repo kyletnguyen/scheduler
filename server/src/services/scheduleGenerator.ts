@@ -2508,6 +2508,25 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               if (filled) continue;
             }
 
+            // S3b: pull admin-parked MLT from Admin station (for MLT positions)
+            // Admin-parked MLTs sit at Admin desk but can cover bench MLT slots
+            if (partialRole === 'mlt' && adminStation) {
+              const parkedMLTs = [...stationMap.entries()]
+                .filter(([eid, sid]) =>
+                  sid === adminStation.id
+                  && empRoleMap.get(eid) === 'mlt'
+                  && isAdminParked(eid)
+                  && isQualified(eid)
+                );
+              for (const [eid] of parkedMLTs) {
+                stationMap.delete(eid);
+                _origSet(eid, station.id);
+                filled = true;
+                break;
+              }
+              if (filled) continue;
+            }
+
             // S4: chain swap — same-role employee covers here, admin backfills their station
             for (const os of realStations) {
               if (os.id === station.id) continue;
@@ -2515,8 +2534,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
               for (const [swapEid] of osAssignees) {
                 if (!canCover(swapEid)) continue;
                 if (osAssignees.length - 1 < getMinStaff(os, shiftName)) {
+                  // Find a backfill: admin or admin-parked employee qualified for the vacated station
                   const bf = [...stationMap.entries()].find(([eid]) =>
-                    eid !== swapEid && empRoleMap.get(eid) === 'admin'
+                    eid !== swapEid
+                    && (empRoleMap.get(eid) === 'admin' || isAdminParked(eid))
                     && (empStationMap.get(eid) ?? []).includes(os.id)
                   );
                   if (bf) {
