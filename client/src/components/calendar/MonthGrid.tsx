@@ -1032,11 +1032,17 @@ export default function MonthGrid() {
                           </span>
                         );
                       } else if (station && isCoveringPartialPTO) {
-                        // Split duty — covering for someone with partial PTO
+                        // Split duty — show home station → coverage station (e.g. AD→BB)
+                        // Home = Admin for admin role, otherwise their first qualified station
+                        const homeStation = emp.role === 'admin'
+                          ? getStationDisplay('Admin')
+                          : emp.stations?.[0]?.name
+                            ? getStationDisplay(emp.stations[0].name)
+                            : null;
+                        const homeAbbr = homeStation && homeStation.abbr !== station.abbr ? homeStation.abbr : null;
                         cellContent = (
-                          <span className="h-5 px-1 rounded text-[8px] font-bold flex items-center justify-center text-white shadow-sm gap-px" style={{ backgroundColor: station.color }}>
-                            <span>{station.abbr}</span>
-                            <span className="text-white/70">+</span>
+                          <span className="h-5 px-1 rounded text-[8px] font-bold flex items-center justify-center text-white shadow-sm" style={{ backgroundColor: station.color }}>
+                            {homeAbbr ? <><span style={{ color: 'rgba(255,255,255,0.7)' }}>{homeAbbr}</span><span style={{ color: 'rgba(255,255,255,0.5)' }}>→</span>{station.abbr}</> : station.abbr}
                           </span>
                         );
                       } else if (station) {
