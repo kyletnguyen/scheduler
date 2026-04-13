@@ -9,14 +9,13 @@ interface Props {
   onClose: () => void;
 }
 
-/** Individual slider row — manages its own local value while dragging so the
- *  parent list doesn't re-render on every pixel of movement. */
+/** Individual slider row — owns its value while dragging so siblings don't re-render. */
 const StationSlider = React.memo(function StationSlider({
   stationId,
   stationName,
   color,
   abbr,
-  weight,
+  committedWeight,
   share,
   onCommit,
 }: {
@@ -24,23 +23,24 @@ const StationSlider = React.memo(function StationSlider({
   stationName: string;
   color: string;
   abbr: string | undefined;
-  weight: number;
+  committedWeight: number;
   share: number;
   onCommit: (id: number, value: number) => void;
 }) {
-  const [localValue, setLocalValue] = useState(weight);
+  // Local value drives the slider + display while the user is actively dragging.
+  // On release we push the final value to the parent.
+  const [localValue, setLocalValue] = useState(committedWeight);
   const dragging = useRef(false);
 
-  // Sync from parent when not actively dragging
-  const prevWeight = useRef(weight);
-  if (weight !== prevWeight.current && !dragging.current) {
-    prevWeight.current = weight;
-    setLocalValue(weight);
+  // If the parent changes the weight externally (e.g. station toggled off/on),
+  // sync local value — but only when we're not mid-drag.
+  const prevCommitted = useRef(committedWeight);
+  if (committedWeight !== prevCommitted.current && !dragging.current) {
+    prevCommitted.current = committedWeight;
+    setLocalValue(committedWeight);
   }
 
-  const localShare = share; // parent-computed share based on committed weights
-  const displayWeight = dragging.current ? localValue : weight;
-  const displayFill = dragging.current ? localValue : weight;
+  const display = dragging.current ? localValue : committedWeight;
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
@@ -57,14 +57,14 @@ const StationSlider = React.memo(function StationSlider({
           <span className="text-xs font-medium text-gray-800">{stationName}</span>
         </div>
         <div className="flex items-center gap-3 text-[10px] tabular-nums">
-          <span className="text-gray-500">
-            wt <span className="font-semibold text-gray-800">{displayWeight}</span>
+          <span className="text-gray-500 w-[42px]">
+            wt <span className="font-semibold text-gray-800">{display}</span>
           </span>
           <span
             className="font-semibold px-1.5 py-0.5 rounded text-white min-w-[36px] text-center"
             style={{ backgroundColor: color }}
           >
-            {localShare}%
+            {share}%
           </span>
         </div>
       </div>
@@ -72,7 +72,7 @@ const StationSlider = React.memo(function StationSlider({
         type="range"
         min={0}
         max={100}
-        value={displayWeight}
+        value={display}
         onPointerDown={() => { dragging.current = true; }}
         onPointerUp={() => {
           dragging.current = false;
@@ -88,14 +88,14 @@ const StationSlider = React.memo(function StationSlider({
           const v = Number(e.target.value);
           setLocalValue(v);
           if (!dragging.current) {
-            // Keyboard / accessibility change — commit immediately
+            // Keyboard / accessibility — commit immediately
             onCommit(stationId, v);
           }
         }}
         className="station-slider"
         style={{
           '--track-color': color,
-          '--fill-pct': `${displayFill}%`,
+          '--fill-pct': `${display}%`,
         } as React.CSSProperties}
       />
     </div>
@@ -152,17 +152,6 @@ export default function StationsEditor({ employee, onClose }: Props) {
     );
   };
 
-  // Stable list of selected stations — sorted alphabetically, only changes
-  // when stations are added/removed (not when weights change).
-  const selectedStations = useMemo(() => {
-    return [...weights.keys()]
-      .map(id => allStations.find(s => s.id === id))
-      .filter((s): s is typeof allStations[0] => s != null)
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [weights.size, ...([...weights.keys()].sort()), allStations]);
-  // ^ Deps: re-compute when station set changes, not on every weight tweak.
-  //   Spreading sorted keys ensures add/remove triggers recalc but value changes don't.
-
   return (
     <td colSpan={5} className="px-0 py-0">
       <div className="bg-green-50 border-t border-b border-green-200 px-4 py-3">
@@ -201,27 +190,29 @@ export default function StationsEditor({ employee, onClose }: Props) {
           )}
         </div>
 
-        {/* Sliders for selected stations */}
-        {selectedStations.length > 0 && (
+        {/* Sliders — order follows allStations (DB order), never changes */}
+        {allStations.some(s => weights.has(s.id)) && (
           <div className="space-y-1.5 mb-3">
-            {selectedStations.map((station) => {
-              const style = stationStyleMap[station.name];
-              const color = style?.color ?? '#16a34a';
-              const weight = weights.get(station.id) ?? 50;
-              const share = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
-              return (
-                <StationSlider
-                  key={station.id}
-                  stationId={station.id}
-                  stationName={station.name}
-                  color={color}
-                  abbr={style?.abbr}
-                  weight={weight}
-                  share={share}
-                  onCommit={commitWeight}
-                />
-              );
-            })}
+            {allStations
+              .filter(s => weights.has(s.id))
+              .map((station) => {
+                const style = stationStyleMap[station.name];
+                const color = style?.color ?? '#16a34a';
+                const weight = weights.get(station.id) ?? 50;
+                const share = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+                return (
+                  <StationSlider
+                    key={station.id}
+                    stationId={station.id}
+                    stationName={station.name}
+                    color={color}
+                    abbr={style?.abbr}
+                    committedWeight={weight}
+                    share={share}
+                    onCommit={commitWeight}
+                  />
+                );
+              })}
           </div>
         )}
 
