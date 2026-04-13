@@ -494,13 +494,36 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
     }
   }
 
-  // Partial PTO without assignment — they're working part of the day but have no station
+  // Partial PTO checks
   const partialTimeOff = timeOff.filter(t => t.off_type === 'custom');
+  const partialPTOSetAnalyze = new Set(partialTimeOff.map(t => `${t.employee_id}-${t.date}`));
+
+  // 1) Partial PTO without any assignment
   for (const to of partialTimeOff) {
     const hasAssignment = result.some(a => a.employee_id === to.employee_id && a.date === to.date);
     if (!hasAssignment) {
       const empName = employees.find(e => e.id === to.employee_id)?.name ?? `Employee #${to.employee_id}`;
       warnings.push(`${to.date} ${empName} has partial PTO but no station assigned — assign a station for the hours they're working`);
+    }
+  }
+
+  // 2) Partial PTO coverage gap — station's only employee(s) have partial PTO,
+  //    no full-day backup is assigned to cover the rest of the shift
+  const warnStationsPartial = stations.filter(s => s.name !== 'Admin');
+  for (const shift of shifts) {
+    const shiftLabel = shift.name;
+    for (const date of dates) {
+      const dayAssignments = result.filter(a => a.date === date && a.shift_id === shift.id);
+      for (const station of warnStationsPartial) {
+        const stationAssignees = dayAssignments.filter(a => a.station_id === station.id);
+        if (stationAssignees.length === 0) continue;
+        const partialEmps = stationAssignees.filter(a => partialPTOSetAnalyze.has(`${a.employee_id}-${date}`));
+        if (partialEmps.length === 0) continue;
+        const fullDayEmps = stationAssignees.filter(a => !partialPTOSetAnalyze.has(`${a.employee_id}-${date}`));
+        if (fullDayEmps.length > 0) continue; // has full-day coverage
+        const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
+        warnings.push(`CRITICAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO with no coverage for the remainder of the shift`);
+      }
     }
   }
 
@@ -2572,7 +2595,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const fullCoverageEmps = stationAssignees.filter(a => !partialPTOSet.has(`${a.employee_id}-${date}`));
           if (fullCoverageEmps.length === 0) {
             const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
-            passWarnings.push(`PIVOTAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO but no one else covers the rest of the shift`);
+            passWarnings.push(`CRITICAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO with no coverage for the remainder of the shift`);
           }
         }
       }
