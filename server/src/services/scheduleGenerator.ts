@@ -522,7 +522,7 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
         const fullDayEmps = stationAssignees.filter(a => !partialPTOSetAnalyze.has(`${a.employee_id}-${date}`));
         if (fullDayEmps.length > 0) continue; // has full-day coverage
         const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
-        warnings.push(`CRITICAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO with no coverage for the remainder of the shift`);
+        warnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift (${shiftLabel})`);
       }
     }
   }
@@ -2067,6 +2067,24 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           }
         }
 
+        // ── Compute stations with partial PTO that need +1 staff ──
+        // Used by the repair pass to avoid undoing partial PTO coverage.
+        const partialPTOStationIds = new Set<number>();
+        {
+          const date = group[0].date;
+          for (const station of realStations) {
+            const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
+            const hasPartial = stationAssignees.some(([eid]) => partialPTOSet.has(`${eid}-${date}`));
+            const hasFullDay = stationAssignees.some(([eid]) => !partialPTOSet.has(`${eid}-${date}`));
+            if (hasPartial && hasFullDay) partialPTOStationIds.add(station.id);
+          }
+        }
+        // Effective min staff: +1 for stations with partial PTO coverage
+        const getEffectiveMin = (station: Station, sName: string) => {
+          const base = getMinStaff(station, sName);
+          return partialPTOStationIds.has(station.id) ? base + 1 : base;
+        };
+
         // ── Repair pass: validate and fix by swapping ──
         // Runs iteratively until no more improvements can be made
         for (let repairIter = 0; repairIter < 10; repairIter++) {
@@ -2100,14 +2118,14 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           for (const station of realStations) {
             const stationAssignees = [...stationMap.entries()].filter(([, sid]) => sid === station.id);
             const current = stationAssignees.length;
-            const minNeeded = getMinStaff(station, shiftName);
-            if (current <= minNeeded) continue; // not overstaffed
+            const effectiveMin = getEffectiveMin(station, shiftName);
+            if (current <= effectiveMin) continue; // not overstaffed (respects partial PTO +1)
 
             // Find employees we can move to understaffed stations
             for (const [eid] of stationAssignees) {
               // Re-check current count (may have changed from prior moves)
               const nowCount = [...stationMap.values()].filter(v => v === station.id).length;
-              if (nowCount <= minNeeded) break; // no longer overstaffed
+              if (nowCount <= effectiveMin) break; // no longer overstaffed
 
               const quals = (empStationMap.get(eid) ?? []).filter(sid =>
                 !adminStation || sid !== adminStation.id
@@ -2526,8 +2544,10 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             }
           }
 
-          // WARNING: overstaffed (beyond overflow cap)
-          if (stationAssignees.length > getMaxStaff(station, shiftName)) {
+          // WARNING: overstaffed (beyond overflow cap) — skip for partial PTO stations
+          // where the extra person is intentional coverage for the departing employee
+          const hasPartialHere = stationAssignees.some(a => partialPTOSet.has(`${a.employee_id}-${date}`));
+          if (stationAssignees.length > getMaxStaff(station, shiftName) && !hasPartialHere) {
             passWarnings.push(`WARNING: ${station.name} has ${stationAssignees.length} staff (max ${getMaxStaff(station, shiftName)}) on ${date} (${shiftLabel})`);
           }
 
@@ -2595,7 +2615,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const fullCoverageEmps = stationAssignees.filter(a => !partialPTOSet.has(`${a.employee_id}-${date}`));
           if (fullCoverageEmps.length === 0) {
             const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
-            passWarnings.push(`CRITICAL: ${station.name} on ${date} (${shiftLabel}) — ${names} has partial PTO with no coverage for the remainder of the shift`);
+            passWarnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift (${shiftLabel})`);
           }
         }
       }
