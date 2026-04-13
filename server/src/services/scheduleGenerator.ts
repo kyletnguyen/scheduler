@@ -1261,6 +1261,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       stationMap: Map<number, number>,
       passIdx: number,
       shiftName: string,
+      placement: Map<string, number>,
     ) {
       const mltStations = realStations.filter(s => s.require_cls === 1);
       // Available MLTs: not locked, not admin-parked, not per-diem, actual MLT role
@@ -1301,7 +1302,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       const tryAssign = (stIdx: number, assignment: Map<number, number>, used: Set<number>) => {
         if (stIdx >= remainingStations.length) {
           let score = 0;
-          // Score based on direct weight: reward placing MLTs at their preferred stations
+          // Proportional targeting: reward stations where the employee is below
+          // their target ratio this month, same as Layer 4 CLS scoring.
           for (const [empId, stationId] of assignment) {
             const quals = getBenchQuals(empId).filter(sid =>
               mltStations.some(s => s.id === sid)
@@ -1309,7 +1311,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const w = getWeight(empId, stationId);
             const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
             const weightFrac = w / totalW;
-            score -= weightFrac * 900;
+            const hist = placement.get(`${empId}-${stationId}`) ?? 0;
+            const totalHist = quals.reduce((sum, q) => sum + (placement.get(`${empId}-${q}`) ?? 0), 0);
+            const targetHist = (totalHist + 1) * weightFrac;
+            const deficit = targetHist - hist;
+            score -= deficit * 900;
           }
           // Penalize unfilled stations
           score += (remainingStations.length - assignment.size) * 1000;
@@ -1348,6 +1354,8 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       for (const [empId, stationId] of bestAssignment) {
         stationMap.set(empId, stationId);
         locked.add(empId);
+        const pk = `${empId}-${stationId}`;
+        placement.set(pk, (placement.get(pk) ?? 0) + 1);
       }
     }
 
@@ -1404,7 +1412,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       for (const a of adminEmps) locked.add(a.employee_id);
     }
 
-    // ── Layer 4: CLS Station Assignment — fill bench with CLS, weight-driven ──
+    // ── Layer 4: CLS Station Assignment — fill bench with CLS, proportional to weights ──
     function layer4_clsRotation(
       pool: Assignment[],
       locked: Set<number>,
@@ -1412,6 +1420,7 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       shiftName: string,
       passIdx: number,
       overflowBalance: Map<number, number>,
+      placement: Map<string, number>,
     ) {
       const clsEmps = pool.filter(a =>
         !locked.has(a.employee_id)
@@ -1487,11 +1496,18 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
           let score = 0;
 
-          // Direct weight scoring: higher weight fraction = lower score = preferred.
-          // This directly maps slider preferences to placement without historical
-          // tracking. Employee with Micro=70, Hema=30 will always prefer Micro.
-          const weightFrac = getWeight(empId, sid) / totalW;
-          score -= weightFrac * 5000;
+          // Proportional targeting: compare actual placements this month to
+          // the target ratio from weights. Strongly reward the station with
+          // the biggest deficit. Vannie at 70% Micro gets ~70% of days there,
+          // not 100%. When placements are flat (day 1), this degenerates to
+          // pure weight scoring.
+          const w = getWeight(empId, sid);
+          const weightFrac = w / totalW;
+          const hist = placement.get(`${empId}-${sid}`) ?? 0;
+          const totalHist = quals.reduce((sum, q) => sum + (placement.get(`${empId}-${q}`) ?? 0), 0);
+          const targetHist = (totalHist + 1) * weightFrac;
+          const deficit = targetHist - hist;
+          score -= deficit * 5000;
 
           // Light tiebreaker for stations that still need bodies
           score -= 50 * (minNeeded - current);
@@ -1512,6 +1528,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           stationMap.set(empId, bestStation);
           locked.add(empId);
           stationCount.set(bestStation, (stationCount.get(bestStation) ?? 0) + 1);
+          // Track placement for proportional targeting across the month
+          const pk = `${empId}-${bestStation}`;
+          placement.set(pk, (placement.get(pk) ?? 0) + 1);
           // Track overflow CLS at Chem/Hema for monthly balance
           const bStation = realStations.find(s => s.id === bestStation);
           if (bStation && isOverflowStation(bStation)) {
@@ -1523,12 +1542,15 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
         }
       }
 
-      // Swap improvement pass: try swapping pairs to improve weight alignment.
-      // Swap if it places both employees closer to their highest-weighted station.
-      const weightScore = (empId: number, sid: number): number => {
+      // Swap improvement pass: try swapping pairs to reduce proportional deficit.
+      const deficitFor = (empId: number, sid: number): number => {
         const quals = getBenchQuals(empId);
+        const w = getWeight(empId, sid);
         const totalW = quals.reduce((sum, q) => sum + getWeight(empId, q), 0) || 1;
-        return getWeight(empId, sid) / totalW;
+        const totalH = quals.reduce((sum, q) => sum + (placement.get(`${empId}-${q}`) ?? 0), 0);
+        const target = (totalH + 1) * (w / totalW);
+        const hist = placement.get(`${empId}-${sid}`) ?? 0;
+        return Math.abs(target - hist);
       };
       for (const empA of orderedCLS) {
         if (!stationMap.has(empA)) continue;
@@ -1539,18 +1561,26 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
           const stB = stationMap.get(empB)!;
           if (stA === stB) continue;
 
-          // Check both can work at each other's station
           if (!getBenchQuals(empA).includes(stB)) continue;
           if (!getBenchQuals(empB).includes(stA)) continue;
 
-          const scoreBefore = weightScore(empA, stA) + weightScore(empB, stB);
-          const scoreAfter = weightScore(empA, stB) + weightScore(empB, stA);
+          const scoreBefore = deficitFor(empA, stA) + deficitFor(empB, stB);
+          const scoreAfter = deficitFor(empA, stB) + deficitFor(empB, stA);
 
-          if (scoreAfter > scoreBefore) {
-            // Swap improves total weight alignment
+          if (scoreAfter < scoreBefore) {
+            // Undo old placements
+            const pkAold = `${empA}-${stA}`;
+            const pkBold = `${empB}-${stB}`;
+            placement.set(pkAold, Math.max(0, (placement.get(pkAold) ?? 1) - 1));
+            placement.set(pkBold, Math.max(0, (placement.get(pkBold) ?? 1) - 1));
+            // Apply swap
             stationMap.set(empA, stB);
             stationMap.set(empB, stA);
-            break; // one swap per employee
+            const pkAnew = `${empA}-${stB}`;
+            const pkBnew = `${empB}-${stA}`;
+            placement.set(pkAnew, (placement.get(pkAnew) ?? 0) + 1);
+            placement.set(pkBnew, (placement.get(pkBnew) ?? 0) + 1);
+            break;
           }
         }
       }
@@ -1966,6 +1996,11 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
       // Reset all station assignments for this pass
       for (const a of result) a.station_id = null as any;
 
+      // Within-month placement counts for proportional targeting.
+      // Tracks how many times each employee is placed at each station this pass,
+      // so 70% weight → ~70% of days (not 100% every day).
+      const passPlacement = new Map<string, number>(); // "empId-stationId" → count
+
       // Track overflow CLS at Chem/Hema for monthly balance
       const overflowBalance = new Map<number, number>();
       let ptoCoverageDiag: Map<string, string> | null = null;
@@ -2005,9 +2040,9 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
 
         // Run the 7 layers in order
         layer1_bloodBank(pool, locked, stationMap, passIdx);
-        layer2_mltPlacement(pool, locked, stationMap, passIdx, shiftName);
+        layer2_mltPlacement(pool, locked, stationMap, passIdx, shiftName, passPlacement);
         layer3_adminPlacement(pool, locked, stationMap, shiftName);
-        layer4_clsRotation(pool, locked, stationMap, shiftName, passIdx, overflowBalance);
+        layer4_clsRotation(pool, locked, stationMap, shiftName, passIdx, overflowBalance, passPlacement);
         layer5_shaynaFill(pool, locked, stationMap, shiftName);
         layer6_perDiemFill(pool, locked, stationMap, shiftName);
         layer7_overflow(pool, locked, stationMap, shiftName, overflowBalance);
