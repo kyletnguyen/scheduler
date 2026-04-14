@@ -267,10 +267,19 @@ export default function MonthGrid() {
       }
       for (const [key, emps] of [...groupMap.entries()].sort((a, b) => (SHIFT_ORDER[a[0]] ?? 9) - (SHIFT_ORDER[b[0]] ?? 9))) {
         const label = key === 'am' ? 'AM' : key === 'pm' ? 'PM' : key.charAt(0).toUpperCase() + key.slice(1);
-        // Sort within shift: role → alphabetical
+        // Sort within shift: role → custom drag order → alphabetical
         emps.sort((a, b) => {
           const roleDiff = (PDF_ROLE_ORDER[a.role] ?? 9) - (PDF_ROLE_ORDER[b.role] ?? 9);
           if (roleDiff !== 0) return roleDiff;
+          const groupKey = `${a.default_shift}-${a.role}`;
+          const order = customOrder[groupKey];
+          if (order) {
+            const ai = order.indexOf(a.id);
+            const bi = order.indexOf(b.id);
+            if (ai >= 0 && bi >= 0) return ai - bi;
+            if (ai >= 0) return -1;
+            if (bi >= 0) return 1;
+          }
           return a.name.localeCompare(b.name);
         });
         shiftGroups.push({ key, label, emps });
