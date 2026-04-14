@@ -1,542 +1,477 @@
 import { useState, useMemo } from 'react';
 
-/* ── Section data ── */
-interface HelpSection {
-  id: string;
-  title: string;
-  keywords: string; // extra search terms not in the content
-  content: () => React.ReactNode;
-}
+/* ── Section registry ── */
+interface HelpSection { id: string; title: string; tags: string; render: () => React.ReactNode }
 
-const sections: HelpSection[] = [
-  /* ─── Overview ─── */
-  {
-    id: 'overview', title: 'Overview', keywords: 'getting started intro workflow',
-    content: () => <>
-      <p>
-        The Lab Shift Scheduler automates monthly schedule generation for clinical lab staff across
-        multiple stations and shifts.
-      </p>
-      <H3>Workflow</H3>
-      <ol className="list-decimal pl-5 space-y-1 mt-2">
-        <li>Configure <strong>Stations</strong> with staffing minimums.</li>
-        <li>Add <strong>Employees</strong> with their role, shift, and station preferences.</li>
-        <li>Set <strong>Rules</strong> (weekend availability, blocked days, required shifts).</li>
-        <li>Mark <strong>Time Off</strong> (full day or partial/half day).</li>
-        <li>Click <strong>Auto-Generate</strong> to create the monthly schedule.</li>
-        <li>Review <strong>Warnings</strong>, make manual adjustments, and <strong>Export PDF</strong>.</li>
-      </ol>
+const SECTIONS: HelpSection[] = [
+
+  // ────────────────────────────────────────────
+  // OVERVIEW
+  // ────────────────────────────────────────────
+  { id: 'overview', title: 'Overview', tags: 'getting started workflow intro',
+    render: () => <>
+      <P>The Lab Shift Scheduler automates monthly schedule generation for clinical lab staff across multiple stations and shifts.</P>
+      <H3>Typical Workflow</H3>
+      <OL items={[
+        'Configure stations with staffing minimums.',
+        'Add employees — set role, default shift, employment type, and station preferences.',
+        'Define rules — weekend availability, blocked days, required shifts.',
+        'Mark time off — full-day or partial (half-day) PTO.',
+        'Auto-generate the monthly schedule.',
+        'Review warnings, make manual adjustments, export to PDF.',
+      ]} />
     </>,
   },
 
-  /* ─── Stations Page ─── */
-  {
-    id: 'stations', title: 'Stations Page', keywords: 'station setup configure min staff mlt allowed cls required color abbreviation',
-    content: () => <>
-      <p>Navigate to <strong>Stations</strong> in the sidebar to configure lab stations.</p>
-
+  // ────────────────────────────────────────────
+  // STATIONS PAGE
+  // ────────────────────────────────────────────
+  { id: 'stations-page', title: 'Stations Page', tags: 'station setup configure min staff add remove',
+    render: () => <>
+      <P>Navigate to <B>Stations</B> in the sidebar.</P>
       <H3>Adding a Station</H3>
-      <p>Type the station name and click <strong>Add Station</strong> (or press Enter).</p>
-
-      <H3>Station Fields</H3>
-      <DefList items={[
-        ['Name', 'Station name (e.g., Hematology/UA, Chemistry, Blood Bank, Microbiology).'],
-        ['CLS Needed (AM / PM / Night)', 'Minimum number of CLS employees required per shift. The scheduler treats these as hard constraints — a CRITICAL warning fires if unmet.'],
+      <P>Enter the station name and click <B>Add Station</B> or press <Kbd>Enter</Kbd>.</P>
+      <H3>Configuration Fields</H3>
+      <DL items={[
+        ['CLS Needed (AM / PM / Night)', 'Minimum CLS required per shift. These are hard constraints — the scheduler generates CRITICAL warnings when unmet.'],
         ['Allows MLT', <>
-          When set to <strong>Yes</strong>, exactly 1 MLT will be assigned to this station per AM shift (in addition to CLS staff).
-          This corresponds to the <code>require_cls</code> setting — stations that require CLS also get an MLT slot.<br />
-          When <strong>No</strong>, only CLS employees are assigned.
-        </>],
-        ['Color & Abbreviation', <>
-          Customize from the schedule grid — click a station badge in the legend bar to open the <strong>Station Style Editor</strong>.
-          Set a 2-3 character abbreviation and a hex color. Changes apply everywhere: grid, PDF, modals.
+          <Pill className="bg-cyan-100 text-cyan-700">Yes — MLTs allowed</Pill> &mdash; exactly 1 MLT is assigned per AM shift in addition to CLS staff. Applies to stations with <code>Require CLS</code> enabled.<br />
+          <Pill className="bg-gray-100 text-gray-400">No — CLS only</Pill> &mdash; only CLS employees are assigned.
         </>],
       ]} />
-
       <H3>Admin Station</H3>
-      <p>
-        The station named <code>Admin</code> is special. Admin-role employees default here.
-        They are only pulled to bench stations when no CLS/MLT can fill a critical gap.
-      </p>
-
+      <P>The station named <code>Admin</code> is reserved. Admin-role employees default here and are only pulled to bench when critical gaps exist.</P>
       <H3>Removing a Station</H3>
-      <p>Click the remove button on the station row. A confirmation dialog appears. Removing a station
-        unlinks all employee qualifications for that station.</p>
+      <P>Click the remove button. A confirmation dialog appears. All employee qualifications for that station are unlinked.</P>
     </>,
   },
 
-  /* ─── Station Style Editor ─── */
-  {
-    id: 'station-style', title: 'Station Style Editor (Color & Abbreviation)', keywords: 'color picker abbreviation badge customize legend',
-    content: () => <>
-      <p>
-        On the <strong>Schedule</strong> page, click any station badge in the legend bar (below the title)
-        to open the Station Style Editor.
-      </p>
-      <ul className="list-disc pl-5 space-y-1 mt-2">
-        <li><strong>Color</strong> &mdash; enter a hex color code or use the color picker. This colors the station badge everywhere (grid cells, PDF, modals, pie chart).</li>
-        <li><strong>Abbreviation</strong> &mdash; set a 2-3 character short label (e.g., HM, CH, BB, MC, AD). Shown in grid cells and PDF badges.</li>
-      </ul>
-      <p className="mt-2">Changes save immediately and update the grid in real-time.</p>
+  // ────────────────────────────────────────────
+  // STATION STYLE EDITOR
+  // ────────────────────────────────────────────
+  { id: 'station-style', title: 'Station Colors & Abbreviations', tags: 'color abbreviation badge legend customize hex',
+    render: () => <>
+      <P>On the <B>Schedule</B> page, click any station badge in the legend bar to open the <B>Station Style Editor</B>.</P>
+      <DL items={[
+        ['Abbreviation', 'A 2–4 character short label displayed in grid cells and PDF badges (e.g., HM, CH, BB, MC, AD).'],
+        ['Color', 'Hex color code applied to the badge background everywhere — grid, PDF, modals, pie charts. Use the color picker or type a hex value.'],
+      ]} />
+      <H3>Default Station Styles</H3>
+      <div className="flex flex-wrap gap-2 mt-2">
+        <StationBadge abbr="HM" color="#8b5cf6" label="Hematology/UA" />
+        <StationBadge abbr="CH" color="#d97706" label="Chemistry" />
+        <StationBadge abbr="MC" color="#059669" label="Microbiology" />
+        <StationBadge abbr="BB" color="#dc2626" label="Blood Bank" />
+        <StationBadge abbr="AD" color="#0ea5e9" label="Admin" />
+      </div>
     </>,
   },
 
-  /* ─── Employees Page ─── */
-  {
-    id: 'employees', title: 'Employees Page', keywords: 'add employee search filter role shift type per-diem part-time full-time delete remove',
-    content: () => <>
-      <p>Navigate to <strong>Employees</strong> in the sidebar to manage your team.</p>
-
-      <H3>Adding an Employee</H3>
-      <p>Click <strong>Add Employee</strong>, fill in name, role, shift, employment type, and weekly hour target.</p>
-
-      <H3>Search & Filter</H3>
-      <ul className="list-disc pl-5 space-y-1 mt-2">
-        <li><strong>Search</strong> &mdash; type a name to filter the list in real-time.</li>
-        <li><strong>Shift filter</strong> &mdash; click AM / PM / Night / Floater buttons (multi-select).</li>
-        <li><strong>Role filter</strong> &mdash; click CLS / MLT / Admin buttons (multi-select).</li>
-        <li><strong>Type filter</strong> &mdash; click Full-time / Part-time / Per-diem buttons.</li>
-        <li><strong>Clear All</strong> &mdash; resets all active filters.</li>
-      </ul>
-
+  // ────────────────────────────────────────────
+  // EMPLOYEES PAGE
+  // ────────────────────────────────────────────
+  { id: 'employees-page', title: 'Employees Page', tags: 'add employee search filter list delete remove breakdown expand',
+    render: () => <>
+      <P>Navigate to <B>Employees</B> in the sidebar.</P>
+      <H3>Search & Filters</H3>
+      <UL items={[
+        <><B>Search</B> — type a name to filter in real-time.</>,
+        <>
+          <B>Shift</B> — <Pill className="bg-amber-100 text-amber-800">AM</Pill> <Pill className="bg-indigo-100 text-indigo-800">PM</Pill> <Pill className="bg-gray-200 text-gray-800">Night</Pill> <Pill className="bg-teal-100 text-teal-800">Floater</Pill>
+        </>,
+        <>
+          <B>Role</B> — <Pill className="bg-blue-100 text-blue-800">CLS</Pill> <Pill className="bg-cyan-100 text-cyan-800">MLT</Pill> <Pill className="bg-orange-100 text-orange-800">Admin</Pill>
+        </>,
+        <>
+          <B>Type</B> — <Pill className="bg-green-100 text-green-800">Full-time</Pill> <Pill className="bg-yellow-100 text-yellow-800">Part-time</Pill> <Pill className="bg-purple-100 text-purple-800">Per-diem</Pill>
+        </>,
+        <><B>On PTO</B> — shows only employees with upcoming time off.</>,
+        <><B>Clear All</B> — resets every active filter.</>,
+      ]} />
       <H3>Employee Row</H3>
-      <p>Each row shows:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li>Name (click to open detail modal), role/shift/type badges.</li>
-        <li>Target hours per week.</li>
-        <li>Info column: upcoming PTO dates, constraint tags (alternating weekends, blocked days, etc.), station qualifications.</li>
-        <li><strong>Expand arrow</strong> &mdash; click to reveal a monthly breakdown showing total days scheduled, station distribution with colored badges and day counts.</li>
-      </ul>
-
+      <P>Each row shows: name (clickable), role/shift/type badges, target hours, upcoming PTO dates, constraint tags, and station qualifications. Click the <B>expand arrow</B> for a monthly breakdown (total days, per-station distribution with day counts).</P>
       <H3>Employee Fields</H3>
-      <DefList items={[
+      <DL items={[
         ['Role', <>
-          <strong>CLS</strong> &mdash; Clinical Lab Scientist. Works any bench station.<br />
-          <strong>MLT</strong> &mdash; Medical Lab Technician. Gets 1 slot per station. Only covered by other MLTs.<br />
-          <strong>Admin</strong> &mdash; Supervisor. Defaults to Admin desk. Can cover CLS positions.
+          <Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill> Clinical Lab Scientist — works any bench station.<br />
+          <Pill className="bg-purple-100 text-purple-700 border border-purple-200">MLT</Pill> Medical Lab Technician — 1 slot per station, only covered by other MLTs.<br />
+          <Pill className="bg-amber-100 text-amber-700 border border-amber-200">Admin</Pill> Supervisor — defaults to Admin desk, can cover CLS positions.
         </>],
-        ['Default Shift', 'AM, PM, Night, or Floater. Determines grid grouping and which shift they are scheduled for.'],
+        ['Default Shift', <>
+          <ShiftBadge shift="AM" /> Day shift &nbsp; <ShiftBadge shift="PM" /> Evening &nbsp; <ShiftBadge shift="Night" /> Overnight &nbsp; <Pill className="bg-teal-100 text-teal-800">Floater</Pill> Flexible
+        </>],
         ['Employment Type', <>
-          <strong>Full-time</strong> &mdash; highest scheduling priority, meets weekly hour target.<br />
-          <strong>Part-time</strong> &mdash; lower weekly hour target.<br />
-          <strong>Per-diem</strong> &mdash; fills remaining gaps after full/part-time staff. Lowest priority.
+          <Pill className="bg-green-100 text-green-800">Full-time</Pill> highest priority, meets weekly hour target.<br />
+          <Pill className="bg-yellow-100 text-yellow-800">Part-time</Pill> lower weekly target.<br />
+          <Pill className="bg-purple-100 text-purple-800">Per-diem</Pill> fills remaining gaps, lowest priority.
         </>],
-        ['Target Hours/Week', 'Weekly hour goal (0-80). The scheduler balances days to approximate this target.'],
+        ['Target Hours/Week', 'Weekly hour goal (0–80). The scheduler distributes days to approximate this target.'],
       ]} />
-
-      <H3>Removing an Employee</H3>
-      <p>Click the remove button. A confirmation dialog appears. This deletes all their assignments, PTO, and constraints.</p>
     </>,
   },
 
-  /* ─── Station Preferences ─── */
-  {
-    id: 'station-prefs', title: 'Station Preferences (Weights)', keywords: 'weight slider pie chart percentage qualified stations',
-    content: () => <>
-      <p>Open an employee's <strong>Stations</strong> tab to configure station preferences.</p>
-
-      <H3>Setting Up Stations</H3>
-      <ol className="list-decimal pl-5 space-y-1 mt-2">
-        <li><strong>Toggle stations</strong> &mdash; click station pills to add/remove from the employee's qualified list.</li>
-        <li><strong>Set percentages</strong> &mdash; drag sliders or click the number to type a value directly.</li>
-        <li><strong>Auto-balance</strong> &mdash; moving one slider automatically adjusts the others to keep the total at 100%.</li>
-        <li><strong>Pie chart</strong> &mdash; visual breakdown updates in real-time.</li>
-      </ol>
-
+  // ────────────────────────────────────────────
+  // STATION PREFERENCES
+  // ────────────────────────────────────────────
+  { id: 'station-prefs', title: 'Station Preferences (Weights)', tags: 'weight slider pie chart percentage qualified proportional',
+    render: () => <>
+      <P>Open an employee and navigate to the <B>Stations</B> tab.</P>
+      <H3>Setting Preferences</H3>
+      <OL items={[
+        'Click station pills to toggle qualification.',
+        'Drag sliders or click the number to type a value. Moving one slider auto-adjusts the others to maintain 100%.',
+        'The pie chart updates in real-time showing the proportional split.',
+      ]} />
       <H3>How the Algorithm Uses Weights</H3>
-      <p>
-        The scheduler uses <strong>proportional tracking</strong> within each generated month.
-        For example, 70% Micro / 30% Hema means roughly 14 of 20 working days at Micro, 6 at Hema.
-        The algorithm tracks placements and shifts to under-represented stations as the month progresses.
-      </p>
-      <Callout type="info">
-        Weights are proportional — 70/30 gives the same result as 7/3 or 140/60. What matters is the ratio.
-      </Callout>
-
+      <P>The scheduler tracks placements within each generated month and targets the weight ratios. Example: 70% Micro / 30% Hema ≈ 14 of 20 working days at Micro, 6 at Hema. Early in the month Micro wins on pure weight; once the target ratio is reached, the algorithm shifts to under-represented stations.</P>
+      <Callout type="info">Weights are proportional — 70/30, 7/3, and 140/60 all produce the same distribution.</Callout>
       <H3>Default Qualifications</H3>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><strong>Admin</strong> with no stations configured &rarr; qualifies for ALL stations.</li>
-        <li><strong>CLS / MLT</strong> with no stations &rarr; qualifies for all bench stations (excluding Admin).</li>
-      </ul>
-    </>,
-  },
-
-  /* ─── Rules & Constraints ─── */
-  {
-    id: 'rules', title: 'Rules & Constraints', keywords: 'weekend alternating swing blocked days required shift group A group B thursday friday monday tuesday',
-    content: () => <>
-      <p>Open an employee's <strong>Rules</strong> tab to set scheduling constraints.</p>
-
-      <H3>Weekend Availability</H3>
-      <DefList items={[
-        ['All Weekends', 'Available every Saturday and Sunday.'],
-        ['Alternating', 'Works every other weekend. Employees split into Group A (1st & 3rd weekends) and Group B (2nd & 4th).'],
-        ['Once a Month', 'Works one weekend per month.'],
-        ['No Weekends', 'Never scheduled on Saturday or Sunday.'],
+      <UL items={[
+        <><B>Admin</B> with no stations configured → qualifies for ALL stations.</>,
+        <><B>CLS / MLT</B> with no stations → qualifies for all bench stations (excluding Admin).</>,
       ]} />
-
-      <H3>Swing Shift Pattern (Alternating Weekends)</H3>
-      <p>When alternating is selected, the scheduler assigns compensating days off around ON-weekends:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><strong>Day off before weekend</strong> &mdash; configurable: Auto, Thursday, or Friday.</li>
-        <li><strong>Day off after weekend</strong> &mdash; configurable: Auto, Monday, or Tuesday.</li>
-      </ul>
-      <p className="mt-1">
-        Default auto pattern: Group A gets Thursday + Monday off, Group B gets Friday + Tuesday off.
-        This ensures coverage on both Thursday and Friday leading into the weekend.
-      </p>
-
-      <H3>Blocked Days</H3>
-      <p>
-        Click day-of-week buttons (Sun-Sat) to block specific days. The employee will <strong>never</strong> be
-        scheduled on blocked days. Shown as red/inactive buttons.
-      </p>
-
-      <H3>Required Shifts</H3>
-      <p>
-        Add specific dates where the employee <strong>must</strong> be scheduled. Select a date, pick a shift
-        (AM/PM/Night), and click Add. These are honored before the scheduler fills remaining days.
-        Remove entries by clicking the X on the chip.
-      </p>
     </>,
   },
 
-  /* ─── Time Off ─── */
-  {
-    id: 'time-off', title: 'Time Off / PTO', keywords: 'pto vacation partial half day full day coverage backup impact warning conflict drag select calendar',
-    content: () => <>
-      <p>Open an employee's <strong>Time Off</strong> tab.</p>
+  // ────────────────────────────────────────────
+  // RULES & CONSTRAINTS
+  // ────────────────────────────────────────────
+  { id: 'rules', title: 'Rules & Constraints', tags: 'weekend alternating swing blocked days required shift group A B thursday friday monday tuesday',
+    render: () => <>
+      <P>Open an employee and navigate to the <B>Rules</B> tab.</P>
+      <H3>Weekend Availability</H3>
+      <DL items={[
+        ['All Weekends', 'Available every Saturday and Sunday.'],
+        ['Alternating', 'Every other weekend. Employees split into Group A (1st & 3rd) and Group B (2nd & 4th).'],
+        ['Once a Month', 'One weekend per month.'],
+        ['No Weekends', 'Never scheduled Saturday or Sunday.'],
+      ]} />
+      <H3>Swing Shift Pattern</H3>
+      <P>When alternating is selected, compensating days off are assigned around ON-weekends:</P>
+      <UL items={[
+        <><B>Day off before weekend</B> — configurable: Auto, Thursday, or Friday.</>,
+        <><B>Day off after weekend</B> — configurable: Auto, Monday, or Tuesday.</>,
+      ]} />
+      <P>Default auto pattern: Group A = Thursday + Monday off. Group B = Friday + Tuesday off.</P>
+      <H3>Blocked Days</H3>
+      <P>Toggle day-of-week buttons (Sun–Sat). Blocked days are absolute — the employee is never scheduled on them.</P>
+      <H3>Required Shifts</H3>
+      <P>Add date + shift combinations where the employee must be scheduled. These are honored before remaining days are filled. Remove by clicking the ✕ on the chip.</P>
+    </>,
+  },
 
+  // ────────────────────────────────────────────
+  // TIME OFF / PTO
+  // ────────────────────────────────────────────
+  { id: 'time-off', title: 'Time Off / PTO', tags: 'pto vacation partial half day full day coverage backup impact warning conflict drag select calendar clear',
+    render: () => <>
+      <P>Open an employee and navigate to the <B>Time Off</B> tab.</P>
       <H3>Full Day PTO</H3>
-      <p>
-        Click the <strong>Full Day</strong> button, then click or drag across dates on the calendar to mark them.
-        Click a marked date to remove it. Full PTO shows as <Badge bg="bg-red-200" text="text-red-800">P</Badge> on the grid.
-        The employee will not be scheduled.
-      </p>
+      <P>Select <B>Full Day</B>, click or drag across calendar dates to mark. The employee will not be scheduled.</P>
+      <div className="flex items-center gap-2 my-2">
+        <span className="text-xs text-gray-500">Appears as:</span>
+        <InlineBadge bg="#fecaca" text="#991b1b">P</InlineBadge>
+        <span className="text-xs text-gray-500">on the grid</span>
+      </div>
 
       <H3>Partial Day (Half Day) PTO</H3>
-      <p>
-        Click <strong>Partial Day</strong>, set the off-hours (e.g., 09:00 to 13:00), then click/drag dates.
-        Partial PTO shows as <Badge bg="bg-red-300" text="text-red-900">BB/2</Badge> on the grid.
-        The employee is still assigned to their station for the hours they're present.
-      </p>
+      <P>Select <B>Partial Day</B>, set the off-hours (e.g., 09:00–13:00), click or drag dates. The employee is still assigned to their station for the hours present.</P>
+      <div className="flex items-center gap-2 my-2">
+        <span className="text-xs text-gray-500">Appears as:</span>
+        <InlineBadge bg="#fca5a5" text="#7f1d1d">BB/2</InlineBadge>
+        <span className="text-xs text-gray-500">on the grid (station abbreviation + /2)</span>
+      </div>
 
       <H3>Drag to Select</H3>
-      <p>Click and drag across multiple dates on the calendar to mark a range in one gesture.</p>
+      <P>Click and drag across multiple calendar dates to mark a range in one gesture.</P>
 
       <H3>PTO Impact Warnings</H3>
-      <p>
-        When marking PTO for an employee who is already scheduled, the app automatically checks
-        whether the PTO would cause staffing conflicts:
-      </p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><strong className="text-red-600">Critical</strong> &mdash; not enough staff to cover all stations on that shift.</li>
-        <li><strong className="text-amber-600">Warning</strong> &mdash; staffing is tight (1-2 extra beyond minimum).</li>
-        <li>Shows who else is already off that day and how many staff remain.</li>
-      </ul>
-      <Callout type="warn">
-        Impact warnings help you decide whether to approve PTO <em>before</em> creating a conflict.
-        If a critical impact is shown, consider denying the PTO or arranging manual coverage.
-      </Callout>
+      <P>When marking PTO for a scheduled employee, the app checks staffing impact:</P>
+      <UL items={[
+        <><span className="font-bold text-red-600">Critical</span> — not enough staff for that shift.</>,
+        <><span className="font-bold text-amber-600">Warning</span> — staffing is tight (1–2 extra beyond minimum).</>,
+        <>Shows who else is already off that day so you can assess total impact.</>,
+      ]} />
+      <Callout type="warn">Impact warnings help you decide <em>before</em> creating a conflict. If critical, consider denying the PTO or arranging manual coverage.</Callout>
 
-      <H3>Partial PTO Coverage (Automatic)</H3>
-      <p>The scheduler automatically finds a <strong>same-role</strong> backup for partial PTO:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li>CLS leaving &rarr; another CLS or Admin covers.</li>
-        <li>MLT leaving &rarr; another MLT covers (including admin-parked MLTs).</li>
-        <li>Backup shows as <Badge bg="bg-green-600" text="text-white">AD&rarr;BB</Badge> on the grid (home &rarr; coverage station).</li>
-        <li>In PDF: <code>BB*</code> with legend note <code>* = covers 2nd half (partial PTO)</code>.</li>
-        <li>In day modal: amber <Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for [employee]</Badge> badge.</li>
-      </ul>
+      <H3>Automatic Partial PTO Coverage</H3>
+      <P>The scheduler finds a <B>same-role</B> backup for partial PTO employees:</P>
+      <UL items={[
+        <>CLS leaving → another CLS or Admin covers.</>,
+        <>MLT leaving → another MLT covers (including admin-parked MLTs).</>,
+        <>Compares against station minimum — a station needing 2 CLS still gets a backup even if 1 full-day CLS is present.</>,
+      ]} />
 
       <H3>Clearing PTO</H3>
-      <p>Click <strong>Clear All</strong> to remove all time-off entries for the displayed month (with confirmation).</p>
+      <P>Click <B>Clear All</B> to remove all entries for the displayed month (with confirmation).</P>
     </>,
   },
 
-  /* ─── Generating ─── */
-  {
-    id: 'generating', title: 'Generating a Schedule', keywords: 'auto-generate algorithm multi-pass 25 passes layer pipeline clear assignments',
-    content: () => <>
-      <p>On the <strong>Schedule</strong> page, click <strong>Auto-Generate</strong>.</p>
-
-      <H3>Confirmation Dialog</H3>
-      <p>
-        A dialog warns: "This will remove all existing assignments for this month." Click <strong>Generate</strong> to
-        proceed or Cancel to abort.
-      </p>
-
-      <H3>Algorithm Overview</H3>
-      <ol className="list-decimal pl-5 space-y-1.5 mt-2">
-        <li><strong>Day assignment</strong> &mdash; assigns employees to shifts based on default shift, hour targets, weekend rules, blocked days, required shifts, and PTO.</li>
-        <li><strong>Station assignment (7-layer pipeline)</strong>:
-          <ul className="list-disc pl-5 mt-1 space-y-0.5 text-xs">
-            <li>Layer 1: Blood Bank &mdash; 1 CLS, weighted by preference.</li>
-            <li>Layer 2: MLT placement &mdash; 1 MLT per require-CLS station.</li>
-            <li>Layer 3: Admin placement &mdash; admins to Admin desk, pulled to bench if critical.</li>
-            <li>Layer 4: CLS rotation &mdash; fills bench using proportional weight targeting.</li>
-            <li>Layer 5: Admin-parked fill &mdash; re-optimizes MLT placements.</li>
-            <li>Layer 6: Per-diem fill &mdash; fills remaining gaps.</li>
-            <li>Layer 7: Overflow &mdash; places remaining employees.</li>
-          </ul>
-        </li>
-        <li><strong>Repair pass</strong> &mdash; fixes understaffing, overstaffing, missing CLS, duplicate MLTs.</li>
-        <li><strong>Partial PTO coverage</strong> &mdash; finds same-role backups (runs last).</li>
-        <li><strong>Multi-pass optimization</strong> &mdash; runs 25 passes with randomized orderings, keeps the best.</li>
-      </ol>
+  // ────────────────────────────────────────────
+  // GENERATING A SCHEDULE
+  // ────────────────────────────────────────────
+  { id: 'generating', title: 'Generating a Schedule', tags: 'auto-generate algorithm multi-pass layer pipeline clear confirmation',
+    render: () => <>
+      <P>On the <B>Schedule</B> page, click <B>Auto-Generate</B>.</P>
+      <Callout type="warn">A confirmation dialog warns that existing assignments for the month will be cleared. Click <B>Generate</B> to proceed.</Callout>
+      <H3>Algorithm Summary</H3>
+      <OL items={[
+        'Day assignment — assigns employees to shifts based on default shift, hour targets, weekend rules, blocked days, required shifts, and PTO.',
+        <>Station assignment — 7-layer pipeline:<br />
+          <span className="text-xs text-gray-500 leading-relaxed">
+            L1: Blood Bank (1 CLS, weighted) → L2: MLT placement (1 per station) → L3: Admin default → L4: CLS rotation (proportional weights) → L5: Admin-parked MLT fill → L6: Per-diem fill → L7: Overflow placement.
+          </span>
+        </>,
+        'Repair pass — iteratively fixes understaffing, overstaffing, missing CLS, duplicate MLTs.',
+        'Partial PTO coverage — finds same-role backups (runs last so nothing undoes it).',
+        'Multi-pass optimization — runs 25 passes with randomized orderings, keeps the best-scoring result.',
+      ]} />
     </>,
   },
 
-  /* ─── Monthly Navigation ─── */
-  {
-    id: 'navigation', title: 'Monthly Navigation', keywords: 'month navigate previous next arrow calendar',
-    content: () => <>
-      <p>At the top of the <strong>Schedule</strong> page:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-2">
-        <li><strong>&larr; / &rarr; arrows</strong> &mdash; navigate to the previous or next month.</li>
-        <li><strong>Month/Year display</strong> &mdash; shows the currently selected month.</li>
-        <li>Assignments, warnings, and PTO all update when you change months.</li>
-      </ul>
-    </>,
-  },
+  // ────────────────────────────────────────────
+  // READING THE GRID
+  // ────────────────────────────────────────────
+  { id: 'grid', title: 'Reading the Schedule Grid', tags: 'grid shift group role banner tint drag reorder cross-shift guest navigate month',
+    render: () => <>
+      <H3>Monthly Navigation</H3>
+      <P>Use <B>← / →</B> arrows at the top to change months. Assignments, warnings, and PTO update automatically.</P>
 
-  /* ─── Grid ─── */
-  {
-    id: 'grid', title: 'Reading the Schedule Grid', keywords: 'grid row column shift group role banner tint drag reorder cross-shift guest',
-    content: () => <>
       <H3>Shift Groups</H3>
-      <p>Gray banners separate <strong>AM</strong>, <strong>PM</strong>, <strong>Night</strong>, and <strong>Floater</strong>.</p>
+      <P>Gray banners separate shifts: <B>AM Shift</B>, <B>PM Shift</B>, <B>Night Shift</B>, <B>Floater</B>. Each includes its own date header row and inline warnings.</P>
 
       <H3>Role Sub-Groups</H3>
-      <p>Within each shift, colored banners group employees by role:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">ADMIN</span> &mdash; amber rows</li>
-        <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">CLS</span> &mdash; blue rows</li>
-        <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">MLT</span> &mdash; purple rows</li>
-      </ul>
+      <P>Within each shift, colored banners and row tints group employees by role:</P>
+      <div className="space-y-1.5 mt-2">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-16 py-0.5 rounded text-center text-[10px] font-bold bg-amber-400 text-white">ADMIN</span>
+          <span className="text-xs text-gray-500">Amber rows</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-16 py-0.5 rounded text-center text-[10px] font-bold bg-blue-500 text-white">CLS</span>
+          <span className="text-xs text-gray-500">Blue rows</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-16 py-0.5 rounded text-center text-[10px] font-bold bg-purple-600 text-white">MLT</span>
+          <span className="text-xs text-gray-500">Purple rows</span>
+        </div>
+      </div>
 
-      <H3>Reordering Employees</H3>
-      <p>Drag the <strong>&#x2630;</strong> handle to reorder within the same role group. Order persists across sessions and is used in PDF exports.</p>
+      <H3>Employee Rows</H3>
+      <P>Each row shows a drag handle (<B>&#x2630;</B>), employee name (clickable), and role badge. Drag within the same role group to reorder — the custom order persists and is reflected in PDF exports.</P>
 
-      <H3>Date Headers</H3>
-      <p>Weekends are orange. Red = critical issues, amber = warnings, blue = today. Click any date header to open the day detail modal.</p>
+      <H3>Date Column Headers</H3>
+      <P>Weekends are highlighted orange. Red backgrounds indicate critical coverage issues; amber indicates warnings; blue indicates today. Click any date header to open the <B>Day Detail Modal</B>.</P>
 
       <H3>Cross-Shift Guest Rows</H3>
-      <p>If an employee is assigned to a shift other than their default (e.g., a PM employee covering AM),
-        they appear as a guest row at the bottom of that shift section with a shift badge label.</p>
+      <P>Employees working a shift other than their default appear as guest rows at the bottom of that shift section, labeled with their home shift (e.g., "John (PM)").</P>
 
-      <H3>Show/Hide Warnings</H3>
-      <p>Toggle the warnings display with the <strong>Show Warnings</strong> / <strong>Hide Warnings</strong> button in the header.</p>
+      <H3>Show / Hide Warnings</H3>
+      <P>Toggle inline warnings below each shift header using the button in the top bar.</P>
     </>,
   },
 
-  /* ─── Grid Symbols ─── */
-  {
-    id: 'grid-symbols', title: 'Grid Symbols Reference', keywords: 'badge symbol icon PTO half day arrow asterisk star cover',
-    content: () => <>
-      <div className="overflow-x-auto">
-        <table className="text-sm border border-gray-200 w-full mt-2">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="px-3 py-2 text-left border-b w-36">Symbol</th>
-              <th className="px-3 py-2 text-left border-b">Meaning</th>
-            </tr>
-          </thead>
+  // ────────────────────────────────────────────
+  // GRID SYMBOLS REFERENCE
+  // ────────────────────────────────────────────
+  { id: 'grid-symbols', title: 'Grid Symbols & Badges Reference', tags: 'badge symbol icon abbreviation pto half day arrow asterisk star cover shift cross',
+    render: () => <>
+      <P>Every cell in the schedule grid uses one of the following visual indicators:</P>
+      <div className="overflow-x-auto mt-3">
+        <table className="text-sm border border-gray-200 w-full">
+          <thead><tr className="bg-gray-50">
+            <th className="px-3 py-2.5 text-left border-b font-semibold w-44">Badge</th>
+            <th className="px-3 py-2.5 text-left border-b font-semibold">Description</th>
+          </tr></thead>
           <tbody>
-            <SymRow sym={<Badge bg="bg-purple-500" text="text-white">HM</Badge>} text="Assigned to a station (color + abbreviation). Each station has a unique color." />
-            <SymRow sym={<Badge bg="bg-red-200" text="text-red-800">P</Badge>} text="Full-day PTO. Employee is completely off." />
-            <SymRow sym={<Badge bg="bg-red-300" text="text-red-900">BB/2</Badge>} text="Partial PTO at station. Employee works first half then leaves." />
-            <SymRow sym={<Badge bg="bg-green-600" text="text-white">AD&rarr;BB</Badge>} text="Split duty. Starts at home station (AD), moves to cover Blood Bank after partial PTO employee leaves." />
-            <SymRow sym={<code className="text-xs bg-gray-100 px-1 rounded">BB*</code>} text="(PDF only) Covers 2nd half at Blood Bank. Legend: * = covers 2nd half (partial PTO)." />
-            <SymRow sym={<Badge bg="bg-amber-200" text="text-amber-800">AM</Badge>} text="Cross-shift badge. Employee normally works a different shift but is covering this one today." />
-            <SymRow sym={<span className="text-gray-300">&mdash;</span>} text="Not scheduled (day off)." />
+            <SymRow badge={<InlineBadge bg="#8b5cf6" text="white">HM</InlineBadge>} desc="Station assignment. Each station has a unique color and 2–4 character abbreviation. The employee works this station for the full day." />
+            <SymRow badge={<InlineBadge bg="#fecaca" text="#991b1b">P</InlineBadge>} desc="Full-day PTO. The employee is completely off and not scheduled." />
+            <SymRow badge={<InlineBadge bg="#fca5a5" text="#7f1d1d">BB/2</InlineBadge>} desc="Partial PTO (half day). The employee works the first half of their shift at Blood Bank, then leaves. Station abbreviation followed by /2." />
+            <SymRow badge={<InlineBadge bg="#059669" text="white">AD→BB</InlineBadge>} desc={<>Split duty (partial PTO coverage). This employee starts at their home station (AD = Admin) then moves to Blood Bank to cover after the partial-PTO employee leaves. Only shown when the covering employee's home station differs from the coverage station, and the roles match (CLS covers CLS, MLT covers MLT).</>} />
+            <SymRow badge={<InlineBadge bg="#059669" text="white">BB*</InlineBadge>} desc={<><B>PDF only.</B> Same as the arrow notation but space-constrained. The asterisk indicates partial PTO coverage. See the PDF legend: <code>* = covers 2nd half (partial PTO)</code>.</>} />
+            <SymRow badge={<InlineBadge bg="#facc15" text="#713f12">AM</InlineBadge>} desc="Cross-shift badge. This employee normally works a different shift (e.g., PM) but is assigned to AM today. Shown in the employee's home shift row." />
+            <SymRow badge={<InlineBadge bg="#4f46e5" text="white">PM</InlineBadge>} desc="Cross-shift badge for PM assignment." />
+            <SymRow badge={<InlineBadge bg="#374151" text="white">NS</InlineBadge>} desc="Cross-shift badge for Night Shift assignment." />
+            <SymRow badge={<span className="text-gray-300 text-base">&mdash;</span>} desc="Not scheduled. The employee has this day off (not PTO — just not assigned)." />
           </tbody>
         </table>
       </div>
     </>,
   },
 
-  /* ─── Day Detail Modal ─── */
-  {
-    id: 'day-modal', title: 'Day Detail Modal', keywords: 'modal coverage who working station breakdown off pto navigate arrow escape',
-    content: () => <>
-      <p>Click any date column header to open the day detail modal.</p>
-
+  // ────────────────────────────────────────────
+  // DAY DETAIL MODAL
+  // ────────────────────────────────────────────
+  { id: 'day-modal', title: 'Day Detail Modal', tags: 'modal coverage station breakdown who working off navigate arrow escape',
+    render: () => <>
+      <P>Click any date column header on the grid to open the day detail view.</P>
       <H3>Navigation</H3>
-      <p>Use <strong>&larr; / &rarr;</strong> arrows (or keyboard) to move between days. Press <strong>Escape</strong> to close.</p>
-
-      <H3>Coverage Issues</H3>
-      <p>Red/amber alerts at the top listing staffing problems for this day+shift.</p>
-
+      <P>Use <B>← / →</B> arrows or keyboard to move between days. Press <Kbd>Escape</Kbd> to close.</P>
+      <H3>Header</H3>
+      <P>Color-coded by severity: <span className="inline-block w-3 h-3 rounded bg-red-500" /> red = critical issues, <span className="inline-block w-3 h-3 rounded bg-amber-500" /> amber = warnings, <span className="inline-block w-3 h-3 rounded bg-emerald-500" /> green = no issues.</P>
       <H3>Who's Working (by Station)</H3>
-      <p>Employees grouped by station with:</p>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li>Name + role badge (CLS / MLT / Admin)</li>
-        <li><Badge bg="bg-red-100" text="text-red-700">1/2 DAY</Badge> &mdash; has partial PTO, leaving mid-shift.</li>
-        <li><Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for [employee]</Badge> &mdash; same-role backup for the partial PTO employee.</li>
-      </ul>
-
+      <P>Employees grouped under their assigned station badge. Each person shows:</P>
+      <UL items={[
+        <>Name + role badge (<Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill> <Pill className="bg-purple-100 text-purple-700 border border-purple-200">MLT</Pill> <Pill className="bg-amber-100 text-amber-700 border border-amber-200">Admin</Pill>)</>,
+        <><Pill className="bg-red-100 text-red-700 border border-red-200">1/2 DAY</Pill> — this employee has partial PTO and leaves mid-shift.</>,
+        <><Pill className="bg-amber-100 text-amber-700 border border-amber-200">covers 2nd half for [employee]</Pill> — this person is the same-role backup covering after the partial-PTO employee leaves.</>,
+      ]} />
       <H3>Who's Off / PTO</H3>
-      <p>Lists employees with time off, with their role badge.</p>
+      <P>Lists employees with time off on this date, with role badges.</P>
     </>,
   },
 
-  /* ─── Manual Adjustments ─── */
-  {
-    id: 'manual', title: 'Manual Adjustments', keywords: 'change station swap remove delete assign specific day click cell empty',
-    content: () => <>
+  // ────────────────────────────────────────────
+  // MANUAL ADJUSTMENTS
+  // ────────────────────────────────────────────
+  { id: 'manual', title: 'Manual Adjustments', tags: 'change station swap remove delete assign click cell empty weekend back-to-back force',
+    render: () => <>
       <H3>Clicking an Assigned Cell</H3>
-      <p>Opens the actions modal with three options:</p>
-      <DefList items={[
-        ['Change Station', 'Pick a different station from the employee\'s qualified list. Includes "No station" option.'],
+      <P>Opens the actions modal:</P>
+      <DL items={[
+        ['Change Station', 'Pick from the employee\'s qualified stations, or "No station."'],
         ['Swap Stations', <>
-          Exchange stations with another same-shift employee. Role rules:<br />
-          <strong>CLS</strong> swaps with CLS only.<br />
-          <strong>MLT</strong> swaps with MLT only.<br />
-          <strong>Admin</strong> can swap into CLS positions (but CLS cannot take Admin duties).
+          Exchange with another same-shift employee. Role rules apply:<br />
+          <Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill> ↔ <Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill> only.<br />
+          <Pill className="bg-purple-100 text-purple-700 border border-purple-200">MLT</Pill> ↔ <Pill className="bg-purple-100 text-purple-700 border border-purple-200">MLT</Pill> only.<br />
+          <Pill className="bg-amber-100 text-amber-700 border border-amber-200">Admin</Pill> → <Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill> (one-directional: admin can take CLS position, but CLS cannot take admin duties).
         </>],
-        ['Remove Assignment', 'Delete the assignment. Employee is unscheduled for that day.'],
+        ['Remove Assignment', 'Deletes the assignment. The employee becomes unscheduled for that day.'],
       ]} />
-
-      <H3>Clicking an Empty Cell (&mdash;)</H3>
-      <p>
-        Opens the assignment modal to schedule someone on that day. Select an employee,
-        shift, and optionally a station.
-      </p>
-
+      <H3>Clicking an Empty Cell (—)</H3>
+      <P>Opens the assignment modal. Select an employee, shift, and optionally a station to schedule them.</P>
       <H3>Weekend Back-to-Back Warning</H3>
-      <p>
-        If assigning someone to a weekend day would create back-to-back weekends,
-        a warning dialog appears. You can <strong>Force Assign</strong> to override or cancel.
-      </p>
+      <P>If assigning someone to a weekend would create consecutive weekends, a warning dialog appears. Click <B>Force Assign</B> to override or Cancel to abort.</P>
     </>,
   },
 
-  /* ─── PDF Export ─── */
-  {
-    id: 'pdf', title: 'PDF Export', keywords: 'export download print pdf landscape letter',
-    content: () => <>
-      <p>Click <strong>Export PDF</strong> on the schedule page.</p>
-
+  // ────────────────────────────────────────────
+  // PDF EXPORT
+  // ────────────────────────────────────────────
+  { id: 'pdf', title: 'PDF Export', tags: 'export download print pdf landscape letter legend',
+    render: () => <>
+      <P>Click <B>Export PDF</B> on the schedule page.</P>
       <H3>Layout</H3>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li>Landscape letter-size, one page per shift.</li>
-        <li>Employees grouped by role (Admin &rarr; CLS &rarr; MLT) with colored header rows.</li>
-        <li>Custom drag order from the grid is preserved.</li>
-        <li>Weekend columns highlighted in orange.</li>
-      </ul>
-
-      <H3>Legend (Two Rows)</H3>
-      <p><strong>Row 1:</strong> Station colors + shift badges.</p>
-      <p><strong>Row 2:</strong> <Badge bg="bg-red-200" text="text-red-800">P</Badge> PTO,{' '}
-        <Badge bg="bg-red-300" text="text-red-900">&frac12;</Badge> Half Day,{' '}
-        <span className="text-gray-400">&mdash;</span> Off,{' '}
-        <code>*</code> = covers 2nd half (partial PTO).</p>
-    </>,
-  },
-
-  /* ─── Warnings ─── */
-  {
-    id: 'warnings', title: 'Warnings & Coverage Issues', keywords: 'critical pivotal suggestion understaffed overstaffed missing cls mlt debug',
-    content: () => <>
-      <H3>Severity Levels</H3>
-      <DefList items={[
-        [<span className="text-red-600 font-bold">CRITICAL</span>, 'Station understaffed, missing CLS, or no partial PTO coverage. Must resolve.'],
-        [<span className="text-amber-600 font-bold">PIVOTAL</span>, 'Missing MLT, or only one qualified employee (no backup).'],
-        [<span className="text-gray-600 font-bold">WARNING</span>, 'Staffing tight, employee over/under weekly hours, overstaffed station.'],
-        [<span className="text-blue-600 font-bold">SUGGESTION</span>, 'Optimization hints — extra CLS, MLT without bench station.'],
+      <UL items={[
+        'Landscape letter-size. One page per shift.',
+        <>Employees grouped by role with colored header rows: <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-400 text-white">ADMIN</span> <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500 text-white">CLS</span> <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-600 text-white">MLT</span></>,
+        'Custom drag order from the grid is preserved.',
+        'Weekend columns highlighted in orange.',
       ]} />
-
-      <H3>Common Warnings</H3>
-      <ul className="list-disc pl-5 space-y-1.5 mt-2">
-        <li><strong>"needs X staff but only Y assigned"</strong> &mdash; station below minimum.</li>
-        <li><strong>"has no CLS assigned"</strong> &mdash; require-CLS station has only MLTs.</li>
-        <li><strong>"has partial PTO with no coverage"</strong> &mdash; no same-role backup found.</li>
-        <li><strong>"is the ONLY person qualified"</strong> &mdash; single point of failure. Cross-train someone.</li>
-        <li><strong>"is off but no other qualified employee is scheduled"</strong> &mdash; PTO approved with no backup.</li>
-      </ul>
-
-      <H3>Inline Warnings</H3>
-      <p>Warnings appear below each shift header on the grid. Toggle visibility with <strong>Show/Hide Warnings</strong>.</p>
+      <H3>Legend</H3>
+      <P><B>Row 1</B> — Station colors and abbreviations + shift badges:</P>
+      <div className="flex flex-wrap items-center gap-2 my-2">
+        <StationBadge abbr="HM" color="#8b5cf6" label="Hematology" />
+        <StationBadge abbr="CH" color="#d97706" label="Chemistry" />
+        <StationBadge abbr="MC" color="#059669" label="Micro" />
+        <StationBadge abbr="BB" color="#dc2626" label="Blood Bank" />
+        <StationBadge abbr="AD" color="#0ea5e9" label="Admin" />
+        <span className="text-gray-300">|</span>
+        <ShiftBadge shift="AM" /> <ShiftBadge shift="PM" /> <ShiftBadge shift="Night" />
+      </div>
+      <P><B>Row 2</B> — Status indicators:</P>
+      <div className="flex flex-wrap items-center gap-3 my-2">
+        <span className="flex items-center gap-1"><InlineBadge bg="#fecaca" text="#b91c1c">P</InlineBadge> <span className="text-xs text-gray-500">PTO</span></span>
+        <span className="flex items-center gap-1"><InlineBadge bg="#fca5a5" text="#991b1b">&frac12;</InlineBadge> <span className="text-xs text-gray-500">Half Day</span></span>
+        <span className="flex items-center gap-1"><InlineBadge bg="#e5e7eb" text="#9ca3af">&mdash;</InlineBadge> <span className="text-xs text-gray-500">Off</span></span>
+        <span className="flex items-center gap-1"><span className="font-bold text-gray-700">*</span> <span className="text-xs text-gray-500">= covers 2nd half (partial PTO)</span></span>
+      </div>
     </>,
   },
 
-  /* ─── Breakdown Panel ─── */
-  {
-    id: 'breakdown', title: 'Schedule Breakdown Panel', keywords: 'bottom panel hours weekly target station distribution summary stats',
-    content: () => <>
-      <p>Below the schedule grid, the breakdown panel shows per-employee statistics:</p>
-
-      <H3>Weekly Hours Table</H3>
-      <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><strong>Target column</strong> &mdash; weekly hour goal.</li>
-        <li><strong>Week columns</strong> &mdash; actual hours scheduled per week. Red highlighting if over target.</li>
-        <li><strong>Total</strong> &mdash; total hours for the month.</li>
-        <li><strong>Weekend count</strong> &mdash; number of weekend days worked.</li>
-      </ul>
-
-      <H3>Station Distribution</H3>
-      <p>
-        For each employee, colored badges show how many days they're assigned to each station.
-        Helps verify that weight preferences are being respected (e.g., 14 days Micro, 6 days Hema
-        for a 70/30 split).
-      </p>
-
-      <H3>Employment Type Badges</H3>
-      <p>Per-Diem and Part-Time employees are labeled so you can quickly identify staffing composition.</p>
+  // ────────────────────────────────────────────
+  // WARNINGS
+  // ────────────────────────────────────────────
+  { id: 'warnings', title: 'Warnings & Coverage Issues', tags: 'critical pivotal suggestion warning understaffed overstaffed missing inline toggle',
+    render: () => <>
+      <P>Warnings appear inline below each shift header (toggle with <B>Show/Hide Warnings</B>) and in the day detail modal.</P>
+      <H3>Severity Levels</H3>
+      <div className="space-y-2 mt-2">
+        <div className="flex items-start gap-2"><span className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-red-500 text-white">CRITICAL</span><span className="text-sm text-gray-600">Station understaffed, missing CLS, or no partial PTO coverage. Must resolve.</span></div>
+        <div className="flex items-start gap-2"><span className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-white">PIVOTAL</span><span className="text-sm text-gray-600">Missing MLT, or only one qualified employee for a station (no backup).</span></div>
+        <div className="flex items-start gap-2"><span className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-gray-400 text-white">WARNING</span><span className="text-sm text-gray-600">Staffing tight, employee over/under weekly hours, overstaffed station.</span></div>
+        <div className="flex items-start gap-2"><span className="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500 text-white">SUGGESTION</span><span className="text-sm text-gray-600">Optimization hint — extra CLS that could be moved, MLT without bench station.</span></div>
+      </div>
+      <H3>Common Warning Messages</H3>
+      <UL items={[
+        <><code>"needs X staff but only Y assigned"</code> — station below minimum.</>,
+        <><code>"has no CLS assigned"</code> — require-CLS station has only MLTs.</>,
+        <><code>"has partial PTO with no coverage"</code> — no same-role backup found for the second half.</>,
+        <><code>"is the ONLY person qualified"</code> — single point of failure. Cross-train another employee.</>,
+        <><code>"is off but no other qualified employee is scheduled"</code> — PTO approved with no backup available.</>,
+      ]} />
     </>,
   },
 
-  /* ─── Role Compatibility ─── */
-  {
-    id: 'roles', title: 'Role Compatibility Reference', keywords: 'cls mlt admin swap cover bench pull',
-    content: () => <>
-      <div className="overflow-x-auto mt-2">
+  // ────────────────────────────────────────────
+  // BREAKDOWN PANEL
+  // ────────────────────────────────────────────
+  { id: 'breakdown', title: 'Schedule Breakdown Panel', tags: 'bottom panel hours weekly target station distribution summary stats weekend',
+    render: () => <>
+      <P>Below the schedule grid, the breakdown table provides per-employee statistics.</P>
+      <H3>Columns</H3>
+      <DL items={[
+        ['Employee', 'Name with role and employment type badges.'],
+        ['Target', 'Weekly hour goal.'],
+        ['Week columns', 'Actual hours scheduled per week. Red highlighting when over target.'],
+        ['Total', 'Total hours for the month.'],
+        ['Wknd', 'Number of weekend days worked.'],
+        ['Stations', 'Colored badges showing how many days at each station (e.g., HM: 14, CH: 6). Useful for verifying weight preferences are being respected.'],
+      ]} />
+    </>,
+  },
+
+  // ────────────────────────────────────────────
+  // ROLE COMPATIBILITY
+  // ────────────────────────────────────────────
+  { id: 'roles', title: 'Role Compatibility Matrix', tags: 'cls mlt admin swap cover bench pull compatibility',
+    render: () => <>
+      <P>Reference table for which roles can perform which actions:</P>
+      <div className="overflow-x-auto mt-3">
         <table className="text-sm border border-gray-200 w-full">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="px-3 py-2 text-left border-b">Action</th>
-              <th className="px-3 py-2 text-center border-b">CLS</th>
-              <th className="px-3 py-2 text-center border-b">MLT</th>
-              <th className="px-3 py-2 text-center border-b">Admin</th>
-            </tr>
-          </thead>
+          <thead><tr className="bg-gray-50">
+            <th className="px-3 py-2.5 text-left border-b font-semibold">Action</th>
+            <th className="px-3 py-2.5 text-center border-b font-semibold"><Pill className="bg-blue-100 text-blue-700 border border-blue-200">CLS</Pill></th>
+            <th className="px-3 py-2.5 text-center border-b font-semibold"><Pill className="bg-purple-100 text-purple-700 border border-purple-200">MLT</Pill></th>
+            <th className="px-3 py-2.5 text-center border-b font-semibold"><Pill className="bg-amber-100 text-amber-700 border border-amber-200">Admin</Pill></th>
+          </tr></thead>
           <tbody>
-            <RoleRow action="Works bench stations" cls="Yes" mlt="Yes (1 per station)" admin="When needed" />
-            <RoleRow action="Covers CLS position" cls="Yes" mlt="No" admin="Yes" />
-            <RoleRow action="Covers MLT position" cls="No" mlt="Yes" admin="No" />
-            <RoleRow action="Swap with CLS" cls="Yes" mlt="No" admin="Yes" />
-            <RoleRow action="Swap with MLT" cls="No" mlt="Yes" admin="No" />
-            <RoleRow action="Swap with Admin" cls="No" mlt="No" admin="No" />
-            <RoleRow action="Pulled to bench when short" cls="N/A" mlt="N/A" admin="Yes" />
-            <RoleRow action="Covers partial PTO (CLS)" cls="Yes" mlt="No" admin="Yes" />
-            <RoleRow action="Covers partial PTO (MLT)" cls="No" mlt="Yes" admin="No" />
-            <RoleRow action="Default station" cls="Bench" mlt="Bench" admin="Admin desk" />
+            <RoleRow a="Works bench stations" c="Yes" m="Yes (1 per station)" ad="When needed" />
+            <RoleRow a="Covers CLS partial PTO" c="Yes" m="No" ad="Yes" />
+            <RoleRow a="Covers MLT partial PTO" c="No" m="Yes" ad="No" />
+            <RoleRow a="Swap with CLS" c="Yes" m="No" ad="Yes" />
+            <RoleRow a="Swap with MLT" c="No" m="Yes" ad="No" />
+            <RoleRow a="Swap with Admin" c="No" m="No" ad="No" />
+            <RoleRow a="Pulled to bench when short" c="—" m="—" ad="Yes" />
+            <RoleRow a="Default station" c="Bench" m="Bench" ad="Admin desk" />
           </tbody>
         </table>
       </div>
     </>,
   },
 
-  /* ─── Keyboard Shortcuts ─── */
-  {
-    id: 'keyboard', title: 'Keyboard Shortcuts & Interactions', keywords: 'keyboard shortcut escape enter drag click',
-    content: () => <>
+  // ────────────────────────────────────────────
+  // KEYBOARD SHORTCUTS
+  // ────────────────────────────────────────────
+  { id: 'keyboard', title: 'Keyboard Shortcuts & Interactions', tags: 'keyboard shortcut escape enter drag click hotkey',
+    render: () => <>
       <div className="overflow-x-auto mt-2">
         <table className="text-sm border border-gray-200 w-full">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="px-3 py-2 text-left border-b w-40">Input</th>
-              <th className="px-3 py-2 text-left border-b">Action</th>
-            </tr>
-          </thead>
+          <thead><tr className="bg-gray-50">
+            <th className="px-3 py-2.5 text-left border-b font-semibold w-48">Input</th>
+            <th className="px-3 py-2.5 text-left border-b font-semibold">Action</th>
+          </tr></thead>
           <tbody>
-            <tr className="border-b"><td className="px-3 py-2 font-mono text-xs">Escape</td><td className="px-3 py-2">Close modal / cancel edit</td></tr>
-            <tr className="border-b"><td className="px-3 py-2 font-mono text-xs">Enter</td><td className="px-3 py-2">Submit (station name, search, percentage input)</td></tr>
-            <tr className="border-b"><td className="px-3 py-2 font-mono text-xs">&larr; / &rarr;</td><td className="px-3 py-2">Navigate days in day detail modal</td></tr>
-            <tr className="border-b"><td className="px-3 py-2 font-mono text-xs">Click + Drag (calendar)</td><td className="px-3 py-2">Select date range for PTO</td></tr>
-            <tr className="border-b"><td className="px-3 py-2 font-mono text-xs">Drag &#x2630; handle</td><td className="px-3 py-2">Reorder employee within role group</td></tr>
-            <tr><td className="px-3 py-2 font-mono text-xs">Click date header</td><td className="px-3 py-2">Open day detail modal</td></tr>
+            <KbRow input={<Kbd>Escape</Kbd>} action="Close modal or cancel edit." />
+            <KbRow input={<Kbd>Enter</Kbd>} action="Submit (station name, search, percentage input)." />
+            <KbRow input={<><Kbd>←</Kbd> <Kbd>→</Kbd></>} action="Navigate days in the day detail modal." />
+            <KbRow input="Click + drag (calendar)" action="Select a date range for PTO." />
+            <KbRow input={<>Drag <B>&#x2630;</B> handle</>} action="Reorder employee within their role group. Persists across sessions." />
+            <KbRow input="Click date header" action="Open day detail modal for that date." />
+            <KbRow input="Click employee name" action="Open employee detail panel (grid) or modal (employees page)." />
+            <KbRow input="Click station badge (legend)" action="Open station style editor (color + abbreviation)." />
+            <KbRow input="Click assigned cell" action="Open actions modal (change station, swap, remove)." />
+            <KbRow input="Click empty cell (—)" action="Open assignment modal to schedule someone." />
           </tbody>
         </table>
       </div>
@@ -544,51 +479,53 @@ const sections: HelpSection[] = [
   },
 ];
 
-/* ── Main Component ── */
+/* ══════════════════════════════════════════════
+   MAIN COMPONENT
+   ══════════════════════════════════════════════ */
 export default function HelpPage() {
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return sections;
+    if (!search.trim()) return SECTIONS;
     const q = search.toLowerCase();
-    return sections.filter(s =>
-      s.title.toLowerCase().includes(q)
-      || s.keywords.toLowerCase().includes(q)
+    return SECTIONS.filter(s =>
+      s.title.toLowerCase().includes(q) || s.tags.includes(q)
     );
   }, [search]);
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4">
-      <h1 className="text-2xl font-bold text-gray-900 mb-2">Help & Reference Guide</h1>
-      <p className="text-sm text-gray-500 mb-4">Complete documentation for the Lab Shift Scheduler.</p>
+      <h1 className="text-2xl font-bold text-gray-900 mb-1">Help & Reference Guide</h1>
+      <p className="text-sm text-gray-400 mb-5">Lab Shift Scheduler &mdash; complete documentation</p>
 
       {/* Search */}
-      <div className="mb-6">
+      <div className="relative mb-6">
         <input
           type="text"
           value={search}
           onChange={(e) => { setSearch(e.target.value); setOpenId(null); }}
           placeholder="Search help topics..."
-          className="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+          className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent bg-white"
         />
-        {search && (
-          <p className="text-xs text-gray-400 mt-1">{filtered.length} of {sections.length} sections match</p>
-        )}
+        <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        {search && <p className="text-[11px] text-gray-400 mt-1 pl-1">{filtered.length} of {SECTIONS.length} sections</p>}
       </div>
 
-      {/* Table of Contents (hidden when searching) */}
+      {/* TOC */}
       {!search && (
-        <nav className="mb-6 bg-gray-50 rounded-lg border border-gray-200 p-4">
-          <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Contents</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
-            {sections.map(s => (
+        <nav className="mb-6 bg-gray-50 rounded-lg border border-gray-200 px-4 py-3">
+          <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Table of Contents</h2>
+          <div className="columns-2 sm:columns-3 gap-x-4">
+            {SECTIONS.map((s, i) => (
               <button
                 key={s.id}
-                onClick={() => { setOpenId(s.id); setTimeout(() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth' }), 50); }}
-                className="text-left text-sm text-blue-600 hover:text-blue-800 hover:underline px-2 py-1 rounded hover:bg-blue-50"
+                onClick={() => { setOpenId(s.id); setTimeout(() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50); }}
+                className="block text-left text-[13px] text-blue-600 hover:text-blue-800 hover:underline py-0.5 break-inside-avoid"
               >
-                {s.title}
+                <span className="text-gray-400 text-[11px] mr-1">{i + 1}.</span>{s.title}
               </button>
             ))}
           </div>
@@ -596,55 +533,112 @@ export default function HelpPage() {
       )}
 
       {/* Sections */}
-      <div className="space-y-3">
-        {filtered.map(s => (
-          <div key={s.id} id={s.id} className="border border-gray-200 rounded-lg overflow-hidden">
-            <button
-              onClick={() => setOpenId(openId === s.id ? null : s.id)}
-              className="w-full text-left px-4 py-3 bg-white hover:bg-gray-50 flex items-center justify-between"
-            >
-              <span className="text-sm font-semibold text-gray-800">{s.title}</span>
-              <span className={`text-gray-400 transition-transform ${openId === s.id ? 'rotate-180' : ''}`}>&#x25BE;</span>
-            </button>
-            {(openId === s.id || (search && filtered.length <= 3)) && (
-              <div className="px-4 pb-4 pt-1 text-sm text-gray-600 leading-relaxed border-t border-gray-100">
-                {s.content()}
-              </div>
-            )}
-          </div>
-        ))}
+      <div className="space-y-2">
+        {filtered.map(s => {
+          const isOpen = openId === s.id || (!!search && filtered.length <= 3);
+          return (
+            <div key={s.id} id={s.id} className={`border rounded-lg overflow-hidden transition-colors ${isOpen ? 'border-blue-200 bg-blue-50/30' : 'border-gray-200 bg-white'}`}>
+              <button
+                onClick={() => setOpenId(openId === s.id ? null : s.id)}
+                className="w-full text-left px-4 py-3 flex items-center justify-between hover:bg-gray-50/80"
+              >
+                <span className="text-sm font-semibold text-gray-800">{s.title}</span>
+                <span className={`text-gray-400 text-xs transition-transform ${isOpen ? 'rotate-180' : ''}`}>&#x25BC;</span>
+              </button>
+              {isOpen && (
+                <div className="px-5 pb-5 pt-1 text-[13px] text-gray-600 leading-relaxed border-t border-gray-100">
+                  {s.render()}
+                </div>
+              )}
+            </div>
+          );
+        })}
         {filtered.length === 0 && (
-          <p className="text-sm text-gray-400 text-center py-8">No matching help topics found.</p>
+          <div className="text-center py-12 text-gray-400">
+            <p className="text-sm">No matching topics found.</p>
+            <button onClick={() => setSearch('')} className="text-blue-500 text-sm mt-1 hover:underline">Clear search</button>
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-/* ── Shared subcomponents ── */
-function H3({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-sm font-semibold text-gray-800 mt-4 mb-1">{children}</h3>;
+/* ══════════════════════════════════════════════
+   SHARED PRIMITIVES
+   ══════════════════════════════════════════════ */
+
+function P({ children }: { children: React.ReactNode }) {
+  return <p className="mt-1.5">{children}</p>;
 }
-function Badge({ bg, text, children }: { bg: string; text: string; children: React.ReactNode }) {
-  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${bg} ${text}`}>{children}</span>;
+function B({ children }: { children: React.ReactNode }) {
+  return <strong className="font-semibold text-gray-800">{children}</strong>;
+}
+function H3({ children }: { children: React.ReactNode }) {
+  return <h3 className="text-[13px] font-bold text-gray-800 mt-5 mb-1 border-b border-gray-100 pb-1">{children}</h3>;
+}
+function Kbd({ children }: { children: React.ReactNode }) {
+  return <kbd className="px-1.5 py-0.5 rounded border border-gray-300 bg-gray-100 text-[11px] font-mono text-gray-700 shadow-sm">{children}</kbd>;
+}
+function Pill({ className, children }: { className: string; children: React.ReactNode }) {
+  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${className}`}>{children}</span>;
+}
+function InlineBadge({ bg, text, children }: { bg: string; text: string; children: React.ReactNode }) {
+  return (
+    <span
+      className="inline-flex items-center justify-center px-1.5 h-5 rounded text-[10px] font-bold shadow-sm"
+      style={{ backgroundColor: bg, color: text }}
+    >
+      {children}
+    </span>
+  );
+}
+function ShiftBadge({ shift }: { shift: 'AM' | 'PM' | 'Night' }) {
+  const map = {
+    AM: { label: 'AM', bg: '#facc15', text: '#713f12' },
+    PM: { label: 'PM', bg: '#4f46e5', text: '#ffffff' },
+    Night: { label: 'NS', bg: '#374151', text: '#ffffff' },
+  };
+  const s = map[shift];
+  return <InlineBadge bg={s.bg} text={s.text}>{s.label}</InlineBadge>;
+}
+function StationBadge({ abbr, color, label }: { abbr: string; color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="inline-flex items-center justify-center w-7 h-5 rounded text-[10px] font-bold text-white shadow-sm" style={{ backgroundColor: color }}>{abbr}</span>
+      <span className="text-xs text-gray-600">{label}</span>
+    </span>
+  );
 }
 function Callout({ type, children }: { type: 'info' | 'warn'; children: React.ReactNode }) {
   const s = type === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-blue-50 border-blue-200 text-blue-800';
-  return <div className={`mt-2 px-3 py-2 rounded border text-xs ${s}`}>{children}</div>;
+  return <div className={`mt-3 px-3 py-2.5 rounded-lg border text-xs leading-relaxed ${s}`}>{children}</div>;
 }
-function DefList({ items }: { items: [React.ReactNode, React.ReactNode][] }) {
+function OL({ items }: { items: React.ReactNode[] }) {
+  return <ol className="list-decimal pl-5 space-y-1.5 mt-2">{items.map((item, i) => <li key={i}>{item}</li>)}</ol>;
+}
+function UL({ items }: { items: React.ReactNode[] }) {
+  return <ul className="list-disc pl-5 space-y-1.5 mt-2">{items.map((item, i) => <li key={i}>{item}</li>)}</ul>;
+}
+function DL({ items }: { items: [React.ReactNode, React.ReactNode][] }) {
   return (
-    <dl className="mt-2 space-y-2">
+    <dl className="mt-2 space-y-3">
       {items.map(([t, d], i) => (
-        <div key={i}><dt className="text-sm font-semibold text-gray-700">{t}</dt><dd className="text-sm text-gray-600 pl-4">{d}</dd></div>
+        <div key={i}><dt className="text-[13px] font-semibold text-gray-700">{t}</dt><dd className="text-[13px] text-gray-600 pl-4 mt-0.5">{d}</dd></div>
       ))}
     </dl>
   );
 }
-function SymRow({ sym, text }: { sym: React.ReactNode; text: string }) {
-  return <tr className="border-b"><td className="px-3 py-2">{sym}</td><td className="px-3 py-2 text-gray-600">{text}</td></tr>;
+function SymRow({ badge, desc }: { badge: React.ReactNode; desc: React.ReactNode }) {
+  return <tr className="border-b border-gray-100"><td className="px-3 py-2.5 align-top">{badge}</td><td className="px-3 py-2.5 text-gray-600">{desc}</td></tr>;
 }
-function RoleRow({ action, cls, mlt, admin }: { action: string; cls: string; mlt: string; admin: string }) {
-  const c = (v: string) => <td className={`px-3 py-2 text-center border-b ${v === 'Yes' ? 'text-green-600' : v === 'No' ? 'text-red-500' : 'text-gray-500'}`}>{v}</td>;
-  return <tr><td className="px-3 py-2 font-medium border-b">{action}</td>{c(cls)}{c(mlt)}{c(admin)}</tr>;
+function RoleRow({ a, c, m, ad }: { a: string; c: string; m: string; ad: string }) {
+  const cell = (v: string) => {
+    const color = v === 'Yes' ? 'text-green-600 font-semibold' : v === 'No' ? 'text-red-400' : 'text-gray-500';
+    return <td className={`px-3 py-2 text-center border-b border-gray-100 ${color}`}>{v}</td>;
+  };
+  return <tr><td className="px-3 py-2 font-medium border-b border-gray-100 text-gray-700">{a}</td>{cell(c)}{cell(m)}{cell(ad)}</tr>;
+}
+function KbRow({ input, action }: { input: React.ReactNode; action: string }) {
+  return <tr className="border-b border-gray-100"><td className="px-3 py-2.5 align-top">{input}</td><td className="px-3 py-2.5 text-gray-600">{action}</td></tr>;
 }
