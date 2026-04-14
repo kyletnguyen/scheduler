@@ -301,100 +301,89 @@ export default function MonthGrid() {
         shiftGroups.push({ key, label: `${shiftLabel} — ${roleLabel}`, emps });
       }
 
-      // Legend renderer (used on each page)
+      // Also add combined pages per shift (all roles on one page)
+      const shiftOnlyMap = new Map<string, typeof employees>();
+      for (const emp of employees) {
+        const key = emp.default_shift;
+        if (!shiftOnlyMap.has(key)) shiftOnlyMap.set(key, []);
+        shiftOnlyMap.get(key)!.push(emp);
+      }
+      for (const [shift, emps] of [...shiftOnlyMap.entries()].sort((a, b) => (SHIFT_ORDER[a[0]] ?? 9) - (SHIFT_ORDER[b[0]] ?? 9))) {
+        const shiftLabel = shift === 'am' ? 'AM' : shift === 'pm' ? 'PM' : shift.charAt(0).toUpperCase() + shift.slice(1);
+        emps.sort((a, b) => {
+          const roleDiff = (PDF_ROLE_ORDER[a.role] ?? 9) - (PDF_ROLE_ORDER[b.role] ?? 9);
+          if (roleDiff !== 0) return roleDiff;
+          const groupKey = `${a.default_shift}-${a.role}`;
+          const order = customOrder[groupKey];
+          if (order) {
+            const ai = order.indexOf(a.id);
+            const bi = order.indexOf(b.id);
+            if (ai >= 0 && bi >= 0) return ai - bi;
+            if (ai >= 0) return -1;
+            if (bi >= 0) return 1;
+          }
+          return a.name.localeCompare(b.name);
+        });
+        shiftGroups.push({ key: `combined-${shift}`, label: `${shiftLabel} — All Staff`, emps });
+      }
+
+      // ── Legend renderer ──
+      // Row 1: Stations   Row 2: Cross-Shift Badges   Row 3: Status Indicators
+      const legendHelper = (lx: number, ly: number, bgRgb: [number,number,number], textRgb: [number,number,number], abbr: string, label: string) => {
+        const [r,g,b] = bgRgb;
+        pdf.setFillColor(r, g, b);
+        pdf.roundedRect(lx, ly - 8, 18, 10, 2, 2, 'F');
+        pdf.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(abbr, lx + 9, ly - 1, { align: 'center' });
+        pdf.setTextColor(60, 60, 60);
+        pdf.setFont('helvetica', 'normal');
+        pdf.text(label, lx + 22, ly);
+        return lx + pdf.getTextWidth(label) + 30;
+      };
+
       const drawLegend = () => {
-        pdf.setFontSize(8);
-        const ly = 46;
-        let lx = 40;
+        pdf.setFontSize(7.5);
 
-        // Stations + Admin
-        pdf.setTextColor(100, 100, 100);
+        // Row 1 — Stations
+        const y1 = 44;
+        let x = 30;
+        pdf.setTextColor(120, 120, 120);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('Stations:', lx, ly);
-        lx += pdf.getTextWidth('Stations:') + 6;
-
-        const legendItems: { abbr: string; rgb: [number, number, number]; label: string }[] =
-          stationsData.map(s => {
-            const style = getStationDisplay(s.name);
-            return { abbr: style.abbr, rgb: style.rgb, label: s.name };
-          });
-        for (const item of legendItems) {
-          const [r, g, b] = item.rgb;
-          pdf.setFillColor(r, g, b);
-          pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
-          pdf.setTextColor(255, 255, 255);
-          pdf.setFont('helvetica', 'bold');
-          pdf.text(item.abbr, lx + 9, ly - 1, { align: 'center' });
-          pdf.setTextColor(80, 80, 80);
-          pdf.setFont('helvetica', 'normal');
-          pdf.text(item.label, lx + 22, ly);
-          lx += pdf.getTextWidth(item.label) + 32;
+        pdf.text('STATIONS', x, y1);
+        x += pdf.getTextWidth('STATIONS') + 8;
+        for (const s of stationsData) {
+          const st = getStationDisplay(s.name);
+          x = legendHelper(x, y1, st.rgb, [255,255,255], st.abbr, s.name);
         }
 
-        // Shift badges (for cross-shift days)
-        lx += 6;
-        pdf.setTextColor(100, 100, 100);
+        // Row 2 — Cross-shift badges
+        const y2 = y1 + 13;
+        x = 30;
+        pdf.setTextColor(120, 120, 120);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('Shifts:', lx, ly);
-        lx += pdf.getTextWidth('Shifts:') + 6;
+        pdf.text('SHIFTS', x, y2);
+        x += pdf.getTextWidth('SHIFTS') + 8;
+        x = legendHelper(x, y2, SHIFT_ICONS.AM.rgb, [120,80,0], 'AM', 'Day');
+        x = legendHelper(x, y2, SHIFT_ICONS.PM.rgb, [255,255,255], 'PM', 'Evening');
+        x = legendHelper(x, y2, SHIFT_ICONS.Night.rgb, [255,255,255], 'NS', 'Night');
 
-        const shiftLegend: { label: string; rgb: [number, number, number]; textRgb: [number, number, number]; name: string }[] = [
-          { label: 'AM', rgb: SHIFT_ICONS.AM.rgb, textRgb: [120, 80, 0], name: 'AM' },
-          { label: 'PM', rgb: SHIFT_ICONS.PM.rgb, textRgb: [255, 255, 255], name: 'PM' },
-          { label: 'NS', rgb: SHIFT_ICONS.Night.rgb, textRgb: [255, 255, 255], name: 'Night' },
-        ];
-        for (const item of shiftLegend) {
-          const [r, g, b] = item.rgb;
-          pdf.setFillColor(r, g, b);
-          pdf.roundedRect(lx, ly - 8, 18, 10, 1.5, 1.5, 'F');
-          pdf.setTextColor(item.textRgb[0], item.textRgb[1], item.textRgb[2]);
-          pdf.setFont('helvetica', 'bold');
-          pdf.text(item.label, lx + 9, ly - 1, { align: 'center' });
-          pdf.setTextColor(80, 80, 80);
-          pdf.setFont('helvetica', 'normal');
-          pdf.text(item.name, lx + 22, ly);
-          lx += pdf.getTextWidth(item.name) + 32;
-        }
-
-        // Second row — PTO, Half Day, Off, * coverage
-        const ly2 = ly + 14;
-        lx = 40;
-
-        pdf.setFillColor(254, 226, 226);
-        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
-        pdf.setTextColor(220, 38, 38);
+        // Row 3 — Status indicators
+        const y3 = y2 + 13;
+        x = 30;
+        pdf.setTextColor(120, 120, 120);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('P', lx + 9, ly2 - 1, { align: 'center' });
+        pdf.text('STATUS', x, y3);
+        x += pdf.getTextWidth('STATUS') + 8;
+        x = legendHelper(x, y3, [254,202,202], [185,28,28], 'P', 'PTO');
+        x = legendHelper(x, y3, [254,178,178], [153,27,27], '½', 'Half Day');
+        x = legendHelper(x, y3, [230,230,230], [160,160,160], '—', 'Off');
+        // Asterisk
         pdf.setTextColor(80, 80, 80);
-        pdf.setFont('helvetica', 'normal');
-        pdf.text('PTO', lx + 22, ly2);
-        lx += pdf.getTextWidth('PTO') + 32;
-
-        pdf.setFillColor(254, 178, 178);
-        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
-        pdf.setTextColor(153, 27, 27);
         pdf.setFont('helvetica', 'bold');
-        pdf.text('½', lx + 9, ly2 - 1, { align: 'center' });
-        pdf.setTextColor(80, 80, 80);
+        pdf.text('*', x + 2, y3);
         pdf.setFont('helvetica', 'normal');
-        pdf.text('Half Day', lx + 22, ly2);
-        lx += pdf.getTextWidth('Half Day') + 32;
-
-        pdf.setFillColor(240, 240, 240);
-        pdf.roundedRect(lx, ly2 - 8, 18, 10, 1.5, 1.5, 'F');
-        pdf.setTextColor(180, 180, 180);
-        pdf.setFont('helvetica', 'normal');
-        pdf.text('—', lx + 9, ly2 - 1, { align: 'center' });
-        pdf.setTextColor(80, 80, 80);
-        pdf.text('Off', lx + 22, ly2);
-        lx += pdf.getTextWidth('Off') + 32;
-
-        pdf.setTextColor(100, 100, 100);
-        pdf.setFont('helvetica', 'bold');
-        pdf.text('*', lx + 2, ly2);
-        pdf.setTextColor(80, 80, 80);
-        pdf.setFont('helvetica', 'normal');
-        pdf.text('= covers 2nd half (partial PTO)', lx + 9, ly2);
+        pdf.text('= covers 2nd half', x + 9, y3);
       };
 
       // Footer renderer
@@ -419,10 +408,10 @@ export default function MonthGrid() {
         if (pageIndex > 0) pdf.addPage();
 
         // Title
-        pdf.setFontSize(18);
-        pdf.setTextColor(30, 30, 30);
+        pdf.setFontSize(22);
+        pdf.setTextColor(20, 20, 20);
         pdf.setFont('helvetica', 'bold');
-        pdf.text(`${format(currentDate, 'MMMM yyyy')} — ${group.label}`, 30, 28);
+        pdf.text(`${format(currentDate, 'MMMM yyyy')} — ${group.label}`, 30, 30);
 
         drawLegend();
 
@@ -533,7 +522,7 @@ export default function MonthGrid() {
         }
 
         autoTable(pdf, {
-          startY: 70,
+          startY: 80,
           margin: { left: margin, right: margin },
           head: [head],
           body,
@@ -622,17 +611,22 @@ export default function MonthGrid() {
             if (text === '—') {
               data.cell.styles.textColor = [200, 200, 200];
             } else {
-              // Hide default text — we'll draw badge + text manually in didDrawCell
-              data.cell.styles.textColor = [255, 255, 255, 0] as any;
+              // Store original text for didDrawCell, then blank cell to prevent ghost text
+              const origKey = `orig-${data.row.index}-${data.column.index}`;
+              cellData.set(origKey, { shiftName: text, stationName: null, isCrossShift: false } as any);
+              data.cell.text = [''];
             }
           },
           didDrawCell: (data) => {
             if (data.section !== 'body') return;
             if (data.column.index === 0) return;
-            if (roleHeaderRows.has(data.row.index)) return; // skip badge drawing for role headers
+            if (roleHeaderRows.has(data.row.index)) return;
 
-            const text = data.cell.text.join('');
-            if (text === '—') return; // dashes rendered normally
+            // Retrieve original cell text (stored in didParseCell before blanking)
+            const origKey = `orig-${data.row.index}-${data.column.index}`;
+            const origData = cellData.get(origKey);
+            const text = origData ? (origData as any).shiftName : (data.cell.text.join('') || '');
+            if (!text || text === '—') return;
 
             const dayIdx = data.column.index - 1;
             const ri = data.row.index;
