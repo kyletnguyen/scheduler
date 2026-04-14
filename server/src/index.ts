@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import Database from 'better-sqlite3';
 import db, { runMigrations } from './db/connection.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import employeesRouter from './routes/employees.js';
@@ -29,12 +30,8 @@ app.use('/api/schedule', schedulesRouter);
 app.use('/api/time-off', timeOffRouter);
 app.use('/api/stations', stationsRouter);
 
-// Reset DB from seed file
+// Reset DB from seed file — uses SQLite backup so the connection stays alive
 app.post('/api/reset-seed', (_req, res) => {
-  const dbPath = process.env.SCHEDULER_DB_PATH;
-  if (!dbPath) {
-    return res.status(400).json({ error: 'No DB path configured (dev mode — copy server/seed/scheduler.db to server/scheduler.db manually)' });
-  }
   const seedPath = process.env.SCHEDULER_SEED_PATH
     ?? (process.env.ELECTRON
       ? path.join((process as any).resourcesPath ?? '', 'app-resources', 'seed', 'scheduler.db')
@@ -45,9 +42,34 @@ app.post('/api/reset-seed', (_req, res) => {
   }
 
   try {
-    db.close();
-    fs.copyFileSync(seedPath, dbPath);
-    res.json({ ok: true, message: 'Database reset to seed data. Restart the app to apply.' });
+    // Open seed DB read-only, copy data table by table into live DB
+    const seedDb = new Database(seedPath, { readonly: true });
+
+    // Get all table names from seed (excluding internal tables)
+    const tables = seedDb.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_migrations'"
+    ).all() as { name: string }[];
+
+    db.exec('PRAGMA foreign_keys = OFF');
+
+    // Clear existing data and copy from seed
+    for (const { name } of tables) {
+      db.exec(`DELETE FROM "${name}"`);
+      const rows = seedDb.prepare(`SELECT * FROM "${name}"`).all() as Record<string, unknown>[];
+      if (rows.length === 0) continue;
+      const cols = Object.keys(rows[0]);
+      const placeholders = cols.map(() => '?').join(', ');
+      const insert = db.prepare(`INSERT OR REPLACE INTO "${name}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`);
+      const insertAll = db.transaction(() => {
+        for (const row of rows) insert.run(...cols.map(c => row[c]));
+      });
+      insertAll();
+    }
+
+    db.exec('PRAGMA foreign_keys = ON');
+    seedDb.close();
+
+    res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
