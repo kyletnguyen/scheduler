@@ -37,6 +37,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "server/seed",
+        "to": "app-resources/seed",
+        "filter": [
+          "scheduler.db"
+        ]
       }
     ],
     "win": {

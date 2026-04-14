@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 let mainWindow;
 let server;
@@ -12,7 +13,20 @@ async function startServer() {
   // Set environment so the server knows it's inside Electron
   process.env.ELECTRON = '1';
   process.env.PORT = String(PORT);
-  process.env.SCHEDULER_DB_PATH = path.join(app.getPath('userData'), 'scheduler.db');
+  const dbPath = path.join(app.getPath('userData'), 'scheduler.db');
+  process.env.SCHEDULER_DB_PATH = dbPath;
+
+  // On first launch, copy the bundled seed DB so the app starts pre-populated
+  if (!fs.existsSync(dbPath)) {
+    const seedPath = isPacked
+      ? path.join(process.resourcesPath, 'app-resources', 'seed', 'scheduler.db')
+      : path.join(__dirname, '..', 'server', 'seed', 'scheduler.db');
+    if (fs.existsSync(seedPath)) {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      fs.copyFileSync(seedPath, dbPath);
+      console.log('Copied seed database to', dbPath);
+    }
+  }
 
   if (isPacked) {
     // In packaged app, everything is in resources/app-resources/

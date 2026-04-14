@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.db
+!server/seed/scheduler.db
 *.db-journal
 *.db-shm
 *.db-wal
