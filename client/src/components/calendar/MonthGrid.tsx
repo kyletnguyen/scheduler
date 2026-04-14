@@ -611,10 +611,13 @@ export default function MonthGrid() {
             if (text === '—') {
               data.cell.styles.textColor = [200, 200, 200];
             } else {
-              // Store original text for didDrawCell, then blank cell to prevent ghost text
+              // Store original text for didDrawCell badge rendering
               const origKey = `orig-${data.row.index}-${data.column.index}`;
               cellData.set(origKey, { shiftName: text, stationName: null, isCrossShift: false } as any);
-              data.cell.text = [''];
+              // Make text invisible by matching it to the cell fill color.
+              // We can't use text=[] because autoTable re-reads from body array.
+              // Instead set fontSize to 0.1 so it's effectively invisible.
+              data.cell.styles.fontSize = 0.1;
             }
           },
           didDrawCell: (data) => {
