@@ -570,22 +570,23 @@ export default function MonthGrid() {
             if (roleHeaderRows.has(data.row.index)) {
               const roleText = data.row.raw?.[0] as string ?? '';
               if (roleText.includes('ADMIN')) {
-                data.cell.styles.fillColor = [255, 251, 235]; // amber-50
-                data.cell.styles.textColor = [180, 83, 9]; // amber-700
+                data.cell.styles.fillColor = [251, 191, 36]; // amber-400
+                data.cell.styles.textColor = [255, 255, 255];
               } else if (roleText.includes('CLS')) {
-                data.cell.styles.fillColor = [239, 246, 255]; // blue-50
-                data.cell.styles.textColor = [29, 78, 216]; // blue-700
+                data.cell.styles.fillColor = [59, 130, 246]; // blue-500
+                data.cell.styles.textColor = [255, 255, 255];
               } else if (roleText.includes('MLT')) {
-                data.cell.styles.fillColor = [250, 245, 255]; // purple-50
-                data.cell.styles.textColor = [126, 34, 206]; // purple-700
+                data.cell.styles.fillColor = [147, 51, 234]; // purple-600
+                data.cell.styles.textColor = [255, 255, 255];
               } else {
-                data.cell.styles.fillColor = [245, 245, 245];
-                data.cell.styles.textColor = [100, 100, 100];
+                data.cell.styles.fillColor = [150, 150, 150];
+                data.cell.styles.textColor = [255, 255, 255];
               }
               data.cell.styles.fontStyle = 'bold';
-              data.cell.styles.fontSize = fontSize;
+              data.cell.styles.fontSize = fontSize + 1;
+              data.cell.styles.minCellHeight = 14;
               if (data.column.index > 0) {
-                data.cell.text = ['']; // only show label in first column
+                data.cell.text = [''];
               }
               return;
             }

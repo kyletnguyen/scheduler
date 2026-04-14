@@ -246,7 +246,7 @@ const sections: HelpSection[] = [
         <li>MLT leaving &rarr; another MLT covers (including admin-parked MLTs).</li>
         <li>Backup shows as <Badge bg="bg-green-600" text="text-white">AD&rarr;BB</Badge> on the grid (home &rarr; coverage station).</li>
         <li>In PDF: <code>BB*</code> with legend note <code>* = covers 2nd half (partial PTO)</code>.</li>
-        <li>In day modal: amber <Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for Randy</Badge> badge.</li>
+        <li>In day modal: amber <Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for [employee]</Badge> badge.</li>
       </ul>
 
       <H3>Clearing PTO</H3>
@@ -373,7 +373,7 @@ const sections: HelpSection[] = [
       <ul className="list-disc pl-5 space-y-1 mt-1">
         <li>Name + role badge (CLS / MLT / Admin)</li>
         <li><Badge bg="bg-red-100" text="text-red-700">1/2 DAY</Badge> &mdash; has partial PTO, leaving mid-shift.</li>
-        <li><Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for Randy</Badge> &mdash; same-role backup for the partial PTO employee.</li>
+        <li><Badge bg="bg-amber-100" text="text-amber-700">covers 2nd half for [employee]</Badge> &mdash; same-role backup for the partial PTO employee.</li>
       </ul>
 
       <H3>Who's Off / PTO</H3>
