@@ -5,6 +5,7 @@ import AppShell from './components/layout/AppShell';
 import MonthGrid from './components/calendar/MonthGrid';
 import EmployeeList from './components/employees/EmployeeList';
 import StationList from './components/stations/StationList';
+import HelpPage from './components/help/HelpPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="/" element={<MonthGrid />} />
             <Route path="/employees" element={<EmployeeList />} />
             <Route path="/stations" element={<StationList />} />
+            <Route path="/help" element={<HelpPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

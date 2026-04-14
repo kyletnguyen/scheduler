@@ -45,13 +45,72 @@ export default function MonthGrid() {
   const [editingStation, setEditingStation] = useState<Station | null>(null);
   const [actionsModal, setActionsModal] = useState<{ assignment: ScheduleAssignment; employee: Employee } | null>(null);
 
-  // Sort employees: group by shift (AM → PM → Night → Floater), then alphabetize within group
+  // Sort employees: shift → role (Admin → CLS → MLT) → custom order (or alphabetical)
   const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
+  const ROLE_ORDER: Record<string, number> = { admin: 0, cls: 1, mlt: 2 };
+
+  // Custom sort order persisted in localStorage per shift+role group
+  const [customOrder, setCustomOrder] = useState<Record<string, number[]>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('schedule-employee-order') ?? '{}');
+    } catch { return {}; }
+  });
+  const saveCustomOrder = (order: Record<string, number[]>) => {
+    setCustomOrder(order);
+    localStorage.setItem('schedule-employee-order', JSON.stringify(order));
+  };
+
   const employees = [...rawEmployees].sort((a, b) => {
     const shiftDiff = (SHIFT_ORDER[a.default_shift] ?? 9) - (SHIFT_ORDER[b.default_shift] ?? 9);
     if (shiftDiff !== 0) return shiftDiff;
+    const roleDiff = (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9);
+    if (roleDiff !== 0) return roleDiff;
+    // Custom order within role group, fallback to alphabetical
+    const groupKey = `${a.default_shift}-${a.role}`;
+    const order = customOrder[groupKey];
+    if (order) {
+      const ai = order.indexOf(a.id);
+      const bi = order.indexOf(b.id);
+      if (ai >= 0 && bi >= 0) return ai - bi;
+      if (ai >= 0) return -1;
+      if (bi >= 0) return 1;
+    }
     return a.name.localeCompare(b.name);
   });
+
+  // Drag state for reordering within role groups
+  const [dragEmpId, setDragEmpId] = useState<number | null>(null);
+  const [dragOverEmpId, setDragOverEmpId] = useState<number | null>(null);
+
+  const handleDragStart = (empId: number) => setDragEmpId(empId);
+  const handleDragOver = (e: React.DragEvent, empId: number) => {
+    e.preventDefault();
+    if (dragEmpId === null || dragEmpId === empId) return;
+    const dragEmp = employees.find(e => e.id === dragEmpId);
+    const overEmp = employees.find(e => e.id === empId);
+    if (!dragEmp || !overEmp) return;
+    // Only allow drag within same shift+role group
+    if (dragEmp.default_shift !== overEmp.default_shift || dragEmp.role !== overEmp.role) return;
+    setDragOverEmpId(empId);
+  };
+  const handleDrop = (empId: number) => {
+    if (dragEmpId === null || dragEmpId === empId) { setDragEmpId(null); setDragOverEmpId(null); return; }
+    const dragEmp = employees.find(e => e.id === dragEmpId);
+    const overEmp = employees.find(e => e.id === empId);
+    if (!dragEmp || !overEmp || dragEmp.default_shift !== overEmp.default_shift || dragEmp.role !== overEmp.role) {
+      setDragEmpId(null); setDragOverEmpId(null); return;
+    }
+    const groupKey = `${dragEmp.default_shift}-${dragEmp.role}`;
+    const groupEmps = employees.filter(e => e.default_shift === dragEmp.default_shift && e.role === dragEmp.role);
+    const currentOrder = groupEmps.map(e => e.id);
+    const fromIdx = currentOrder.indexOf(dragEmpId);
+    const toIdx = currentOrder.indexOf(empId);
+    currentOrder.splice(fromIdx, 1);
+    currentOrder.splice(toIdx, 0, dragEmpId);
+    saveCustomOrder({ ...customOrder, [groupKey]: currentOrder });
+    setDragEmpId(null);
+    setDragOverEmpId(null);
+  };
 
   const [modal, setModal] = useState<{ date: string; shift: Shift; employee?: Employee } | null>(null);
   const [showWarnings, setShowWarnings] = useState(true);
@@ -196,8 +255,9 @@ export default function MonthGrid() {
       const pageWidth = pdf.internal.pageSize.width;
       const pageHeight = pdf.internal.pageSize.height;
 
-      // Group employees by shift
+      // Group employees by shift, sorted by role within each shift
       const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
+      const PDF_ROLE_ORDER: Record<string, number> = { admin: 0, cls: 1, mlt: 2 };
       const shiftGroups: { key: string; label: string; emps: typeof employees }[] = [];
       const groupMap = new Map<string, typeof employees>();
       for (const emp of employees) {
@@ -207,6 +267,12 @@ export default function MonthGrid() {
       }
       for (const [key, emps] of [...groupMap.entries()].sort((a, b) => (SHIFT_ORDER[a[0]] ?? 9) - (SHIFT_ORDER[b[0]] ?? 9))) {
         const label = key === 'am' ? 'AM' : key === 'pm' ? 'PM' : key.charAt(0).toUpperCase() + key.slice(1);
+        // Sort within shift: role → alphabetical
+        emps.sort((a, b) => {
+          const roleDiff = (PDF_ROLE_ORDER[a.role] ?? 9) - (PDF_ROLE_ORDER[b.role] ?? 9);
+          if (roleDiff !== 0) return roleDiff;
+          return a.name.localeCompare(b.name);
+        });
         shiftGroups.push({ key, label, emps });
       }
 
@@ -340,7 +406,19 @@ export default function MonthGrid() {
         const body: string[][] = [];
         const guestRowIndices = new Set<number>();
 
-        group.emps.forEach((emp, ri) => {
+        const roleHeaderRows = new Set<number>(); // track which body rows are role headers
+        const PDF_ROLE_LABELS: Record<string, string> = { admin: 'ADMIN / SUPERVISOR', cls: 'CLS', mlt: 'MLT' };
+        group.emps.forEach((emp, empIdx) => {
+          // Insert role header row when role changes
+          const prevEmpRole = empIdx > 0 ? group.emps[empIdx - 1].role : null;
+          if (empIdx === 0 || emp.role !== prevEmpRole) {
+            roleHeaderRows.add(body.length);
+            const headerCells = [PDF_ROLE_LABELS[emp.role] ?? emp.role.toUpperCase()];
+            for (let ci = 0; ci < days.length; ci++) headerCells.push('');
+            body.push(headerCells);
+          }
+
+          const ri = body.length;
           const cells = [emp.name];
           for (let ci = 0; ci < days.length; ci++) {
             const dateStr = format(days[ci], 'yyyy-MM-dd');
@@ -479,6 +557,30 @@ export default function MonthGrid() {
             }
             if (data.section !== 'body') return;
 
+            // Role header rows — colored banner spanning full width
+            if (roleHeaderRows.has(data.row.index)) {
+              const roleText = data.row.raw?.[0] as string ?? '';
+              if (roleText.includes('ADMIN')) {
+                data.cell.styles.fillColor = [255, 251, 235]; // amber-50
+                data.cell.styles.textColor = [180, 83, 9]; // amber-700
+              } else if (roleText.includes('CLS')) {
+                data.cell.styles.fillColor = [239, 246, 255]; // blue-50
+                data.cell.styles.textColor = [29, 78, 216]; // blue-700
+              } else if (roleText.includes('MLT')) {
+                data.cell.styles.fillColor = [250, 245, 255]; // purple-50
+                data.cell.styles.textColor = [126, 34, 206]; // purple-700
+              } else {
+                data.cell.styles.fillColor = [245, 245, 245];
+                data.cell.styles.textColor = [100, 100, 100];
+              }
+              data.cell.styles.fontStyle = 'bold';
+              data.cell.styles.fontSize = fontSize;
+              if (data.column.index > 0) {
+                data.cell.text = ['']; // only show label in first column
+              }
+              return;
+            }
+
             const isOddRow = data.row.index % 2 === 1;
             const dayIdx = data.column.index - 1;
 
@@ -511,6 +613,7 @@ export default function MonthGrid() {
           didDrawCell: (data) => {
             if (data.section !== 'body') return;
             if (data.column.index === 0) return;
+            if (roleHeaderRows.has(data.row.index)) return; // skip badge drawing for role headers
 
             const text = data.cell.text.join('');
             if (text === '—') return; // dashes rendered normally
@@ -929,8 +1032,16 @@ export default function MonthGrid() {
             {employees.map((emp, idx) => {
               const empTimeOff = timeOffIndex.get(emp.id);
               const prevShift = idx > 0 ? employees[idx - 1].default_shift : null;
+              const prevRole = idx > 0 ? employees[idx - 1].role : null;
               const showGroupHeader = emp.default_shift !== prevShift;
+              const showRoleBanner = showGroupHeader || emp.role !== prevRole;
               const groupLabel = emp.default_shift === 'am' ? 'AM' : emp.default_shift === 'pm' ? 'PM' : emp.default_shift.charAt(0).toUpperCase() + emp.default_shift.slice(1);
+              const ROLE_LABEL: Record<string, { label: string; bg: string; text: string }> = {
+                admin: { label: 'Admin / Supervisor', bg: 'bg-amber-50', text: 'text-amber-700' },
+                cls: { label: 'CLS', bg: 'bg-blue-50', text: 'text-blue-700' },
+                mlt: { label: 'MLT', bg: 'bg-purple-50', text: 'text-purple-700' },
+              };
+              const roleInfo = ROLE_LABEL[emp.role] ?? { label: emp.role.toUpperCase(), bg: 'bg-gray-50', text: 'text-gray-600' };
               return (
                 <React.Fragment key={emp.id}>
                 {showGroupHeader && (
@@ -986,9 +1097,24 @@ export default function MonthGrid() {
                   </tr>
                   </>
                 )}
-                <tr className="hover:bg-blue-50/40 border-b border-gray-200">
+                {showRoleBanner && (
+                  <tr className={roleInfo.bg}>
+                    <td colSpan={days.length + 1} className={`sticky left-0 px-4 py-1 text-[10px] font-bold uppercase tracking-wider border-b border-gray-200 ${roleInfo.text}`}>
+                      {roleInfo.label}
+                    </td>
+                  </tr>
+                )}
+                <tr
+                  className={`hover:bg-blue-50/40 border-b border-gray-200 ${dragOverEmpId === emp.id ? 'ring-2 ring-inset ring-blue-400' : ''}`}
+                  draggable
+                  onDragStart={() => handleDragStart(emp.id)}
+                  onDragOver={(e) => handleDragOver(e, emp.id)}
+                  onDrop={() => handleDrop(emp.id)}
+                  onDragEnd={() => { setDragEmpId(null); setDragOverEmpId(null); }}
+                >
                   <td className="sticky left-0 bg-white z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px]">
                     <div className="flex items-center gap-1.5 relative">
+                      <span className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 select-none" title="Drag to reorder">&#x2630;</span>
                       <button
                         onClick={(e) => { e.stopPropagation(); setEmployeeDetail(employeeDetail === emp.id ? null : emp.id); }}
                         className="hover:text-blue-600 hover:underline transition-colors text-left font-semibold"

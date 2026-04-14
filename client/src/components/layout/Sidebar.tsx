@@ -4,6 +4,7 @@ const links = [
   { to: '/', label: 'Schedule' },
   { to: '/employees', label: 'Employees' },
   { to: '/stations', label: 'Stations' },
+  { to: '/help', label: 'Help & Guide' },
 ];
 
 export default function Sidebar() {
