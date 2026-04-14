@@ -1,8 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { runMigrations } from './db/connection.js';
+import db, { runMigrations } from './db/connection.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import employeesRouter from './routes/employees.js';
 import shiftsRouter from './routes/shifts.js';
@@ -27,6 +28,30 @@ app.use('/api/shifts', shiftsRouter);
 app.use('/api/schedule', schedulesRouter);
 app.use('/api/time-off', timeOffRouter);
 app.use('/api/stations', stationsRouter);
+
+// Reset DB from seed file
+app.post('/api/reset-seed', (_req, res) => {
+  const dbPath = process.env.SCHEDULER_DB_PATH;
+  if (!dbPath) {
+    return res.status(400).json({ error: 'No DB path configured (dev mode — copy server/seed/scheduler.db to server/scheduler.db manually)' });
+  }
+  const seedPath = process.env.SCHEDULER_SEED_PATH
+    ?? (process.env.ELECTRON
+      ? path.join(process.resourcesPath ?? '', 'app-resources', 'seed', 'scheduler.db')
+      : path.join(__dirname, '..', 'seed', 'scheduler.db'));
+
+  if (!fs.existsSync(seedPath)) {
+    return res.status(404).json({ error: 'Seed database not found' });
+  }
+
+  try {
+    db.close();
+    fs.copyFileSync(seedPath, dbPath);
+    res.json({ ok: true, message: 'Database reset to seed data. Restart the app to apply.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // In production/Electron, serve the built client
 const clientDist = process.env.SCHEDULER_CLIENT_PATH
