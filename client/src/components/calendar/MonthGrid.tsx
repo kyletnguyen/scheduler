@@ -421,7 +421,7 @@ export default function MonthGrid() {
         const guestRowIndices = new Set<number>();
 
         const roleHeaderRows = new Set<number>(); // unused now but kept for didParseCell/didDrawCell compat
-        group.emps.forEach((emp, empIdx) => {
+        group.emps.forEach((emp) => {
           const ri = body.length;
           const cells = [emp.name];
           for (let ci = 0; ci < days.length; ci++) {
@@ -563,7 +563,7 @@ export default function MonthGrid() {
 
             // Role header rows — colored banner spanning full width
             if (roleHeaderRows.has(data.row.index)) {
-              const roleText = data.row.raw?.[0] as string ?? '';
+              const roleText = String((data.row.raw as any)?.[0] ?? '');
               if (roleText.includes('ADMIN')) {
                 data.cell.styles.fillColor = [251, 191, 36]; // amber-400
                 data.cell.styles.textColor = [255, 255, 255];
