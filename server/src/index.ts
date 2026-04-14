@@ -37,7 +37,7 @@ app.post('/api/reset-seed', (_req, res) => {
   }
   const seedPath = process.env.SCHEDULER_SEED_PATH
     ?? (process.env.ELECTRON
-      ? path.join(process.resourcesPath ?? '', 'app-resources', 'seed', 'scheduler.db')
+      ? path.join((process as any).resourcesPath ?? '', 'app-resources', 'seed', 'scheduler.db')
       : path.join(__dirname, '..', 'seed', 'scheduler.db'));
 
   if (!fs.existsSync(seedPath)) {
