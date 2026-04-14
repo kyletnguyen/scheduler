@@ -1105,14 +1105,22 @@ export default function MonthGrid() {
                   </tr>
                 )}
                 <tr
-                  className={`hover:bg-blue-50/40 border-b border-gray-200 ${dragOverEmpId === emp.id ? 'ring-2 ring-inset ring-blue-400' : ''}`}
+                  className={`border-b border-gray-200 ${dragOverEmpId === emp.id ? 'ring-2 ring-inset ring-blue-400' : ''} ${
+                    emp.role === 'admin' ? 'bg-amber-50/40 hover:bg-amber-50/70'
+                    : emp.role === 'mlt' ? 'bg-purple-50/40 hover:bg-purple-50/70'
+                    : 'bg-blue-50/30 hover:bg-blue-50/60'
+                  }`}
                   draggable
                   onDragStart={() => handleDragStart(emp.id)}
                   onDragOver={(e) => handleDragOver(e, emp.id)}
                   onDrop={() => handleDrop(emp.id)}
                   onDragEnd={() => { setDragEmpId(null); setDragOverEmpId(null); }}
                 >
-                  <td className="sticky left-0 bg-white z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px]">
+                  <td className={`sticky left-0 z-10 px-3 py-2 border-r-2 border-gray-300 font-semibold text-gray-800 whitespace-nowrap text-[13px] ${
+                    emp.role === 'admin' ? 'bg-amber-50'
+                    : emp.role === 'mlt' ? 'bg-purple-50'
+                    : 'bg-blue-50'
+                  }`}>
                     <div className="flex items-center gap-1.5 relative">
                       <span className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 select-none" title="Drag to reorder">&#x2630;</span>
                       <button
