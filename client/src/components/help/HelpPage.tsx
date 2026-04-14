@@ -310,7 +310,7 @@ const sections: HelpSection[] = [
       <H3>Role Sub-Groups</H3>
       <p>Within each shift, colored banners group employees by role:</p>
       <ul className="list-disc pl-5 space-y-1 mt-1">
-        <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">ADMIN / SUPERVISOR</span> &mdash; amber rows</li>
+        <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">ADMIN</span> &mdash; amber rows</li>
         <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">CLS</span> &mdash; blue rows</li>
         <li><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">MLT</span> &mdash; purple rows</li>
       </ul>

@@ -416,7 +416,7 @@ export default function MonthGrid() {
         const guestRowIndices = new Set<number>();
 
         const roleHeaderRows = new Set<number>(); // track which body rows are role headers
-        const PDF_ROLE_LABELS: Record<string, string> = { admin: 'ADMIN / SUPERVISOR', cls: 'CLS', mlt: 'MLT' };
+        const PDF_ROLE_LABELS: Record<string, string> = { admin: 'ADMIN', cls: 'CLS', mlt: 'MLT' };
         group.emps.forEach((emp, empIdx) => {
           // Insert role header row when role changes
           const prevEmpRole = empIdx > 0 ? group.emps[empIdx - 1].role : null;
@@ -1047,7 +1047,7 @@ export default function MonthGrid() {
               const showRoleBanner = showGroupHeader || emp.role !== prevRole;
               const groupLabel = emp.default_shift === 'am' ? 'AM' : emp.default_shift === 'pm' ? 'PM' : emp.default_shift.charAt(0).toUpperCase() + emp.default_shift.slice(1);
               const ROLE_LABEL: Record<string, { label: string; bg: string; text: string }> = {
-                admin: { label: 'Admin / Supervisor', bg: 'bg-amber-50', text: 'text-amber-700' },
+                admin: { label: 'Admin', bg: 'bg-amber-50', text: 'text-amber-700' },
                 cls: { label: 'CLS', bg: 'bg-blue-50', text: 'text-blue-700' },
                 mlt: { label: 'MLT', bg: 'bg-purple-50', text: 'text-purple-700' },
               };

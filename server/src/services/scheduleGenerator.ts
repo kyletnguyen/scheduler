@@ -527,7 +527,15 @@ export function analyzeSchedule(month: string): { warnings: string[] } {
           if (pRole === 'mlt') return r === 'mlt';
           return r === 'cls' || r === 'admin';
         });
-        if (fullDayEmps.length > 0) continue;
+        // Compare against station minimum: a station needing 2 CLS with only 1
+        // full-day CLS still needs a backup even though fullDayEmps > 0
+        const sn = shift.name.toLowerCase();
+        const minRoleNeeded = pRole === 'mlt'
+          ? ((station as any).min_mlt ?? ((station as any).require_cls === 1 ? 1 : 0))
+          : (sn === 'am' ? (station as any).min_staff_am ?? (station as any).min_staff ?? 1
+            : sn === 'pm' ? (station as any).min_staff_pm ?? (station as any).min_staff ?? 1
+            : (station as any).min_staff_night ?? (station as any).min_staff ?? 1);
+        if (fullDayEmps.length >= minRoleNeeded) continue;
         const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
         warnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift (${shiftLabel})`);
       }
@@ -2489,16 +2497,22 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             const partialEmps = stationAssignees.filter(([eid]) => partialPTOSet.has(`${eid}-${date}`));
             if (partialEmps.length === 0) continue;
 
-            // Role-aware coverage check: an MLT leaving needs another MLT to cover,
-            // not just any full-day person. A CLS at the same station doesn't count.
+            // Role-aware coverage check: compare full-day same-role staff against
+            // the station's minimum. A station needing 2 CLS with 1 full-day CLS
+            // and 1 partial-PTO CLS still needs a backup for the 2nd half.
             const partialRole = empRoleMap.get(partialEmps[0][0]);
-            const fullDayCovers = stationAssignees.filter(([eid]) => {
-              if (partialPTOSet.has(`${eid}-${date}`)) return false; // also partial
+            const fullDaySameRole = stationAssignees.filter(([eid]) => {
+              if (partialPTOSet.has(`${eid}-${date}`)) return false;
               const role = empRoleMap.get(eid);
-              if (partialRole === 'mlt') return role === 'mlt'; // only MLT covers MLT
-              return role === 'cls' || role === 'admin'; // CLS/admin covers CLS
+              if (partialRole === 'mlt') return role === 'mlt';
+              return role === 'cls' || role === 'admin';
             });
-            if (fullDayCovers.length > 0) continue;
+            // How many same-role staff does this station need?
+            const minNeeded = partialRole === 'mlt'
+              ? getMLTSlots(station, shiftName)
+              : getCLSNeeded(station, shiftName);
+            // If full-day same-role staff already meets the minimum, no backup needed
+            if (fullDaySameRole.length >= minNeeded) continue;
 
             const isQualified = (eid: number) =>
               (empStationMap.get(eid) ?? []).includes(station.id);
@@ -2779,7 +2793,13 @@ export function generateSchedule(month: string): { assignments: Assignment[]; wa
             if (pRole === 'mlt') return r === 'mlt';
             return r === 'cls' || r === 'admin';
           });
-          if (fullCoverageEmps.length === 0) {
+          // Check against station minimum — not just "any cover exists"
+          const sName = shifts.find(s => s.id === group[0].shift_id)?.name?.toLowerCase() ?? '';
+          const warnMinNeeded = pRole === 'mlt'
+            ? getMLTSlots(station, sName)
+            : getCLSNeeded(station, sName);
+          if (fullCoverageEmps.length >= warnMinNeeded) continue;
+          {
             const names = partialEmps.map(a => employees.find(e => e.id === a.employee_id)?.name ?? `#${a.employee_id}`).join(', ');
             const diagInfo = ptoCoverageDiag?.get(`${station.id}-${date}`) ?? '';
             passWarnings.push(`CRITICAL: ${station.name} on ${date} — ${names} has partial PTO with no coverage for the remainder of the shift${diagInfo ? ` [DEBUG: ${diagInfo}]` : ''} (${shiftLabel})`);
