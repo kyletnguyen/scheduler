@@ -255,22 +255,37 @@ export default function MonthGrid() {
       const pageWidth = pdf.internal.pageSize.width;
       const pageHeight = pdf.internal.pageSize.height;
 
-      // Group employees by shift, sorted by role within each shift
+      // Group employees by shift+role — each combination gets its own page
       const SHIFT_ORDER: Record<string, number> = { am: 0, pm: 1, night: 2, floater: 3 };
       const PDF_ROLE_ORDER: Record<string, number> = { admin: 0, cls: 1, mlt: 2 };
+      const PDF_ROLE_LABEL: Record<string, string> = { admin: 'Admin', cls: 'CLS', mlt: 'MLT' };
       const shiftGroups: { key: string; label: string; emps: typeof employees }[] = [];
-      const groupMap = new Map<string, typeof employees>();
+
+      // Build shift → role → employees mapping
+      const shiftRoleMap = new Map<string, typeof employees>();
       for (const emp of employees) {
-        const key = emp.default_shift;
-        if (!groupMap.has(key)) groupMap.set(key, []);
-        groupMap.get(key)!.push(emp);
+        const key = `${emp.default_shift}-${emp.role}`;
+        if (!shiftRoleMap.has(key)) shiftRoleMap.set(key, []);
+        shiftRoleMap.get(key)!.push(emp);
       }
-      for (const [key, emps] of [...groupMap.entries()].sort((a, b) => (SHIFT_ORDER[a[0]] ?? 9) - (SHIFT_ORDER[b[0]] ?? 9))) {
-        const label = key === 'am' ? 'AM' : key === 'pm' ? 'PM' : key.charAt(0).toUpperCase() + key.slice(1);
-        // Sort within shift: role → custom drag order → alphabetical
+
+      // Sort and create pages
+      const sortedKeys = [...shiftRoleMap.keys()].sort((a, b) => {
+        const [aShift, aRole] = a.split('-');
+        const [bShift, bRole] = b.split('-');
+        const shiftDiff = (SHIFT_ORDER[aShift] ?? 9) - (SHIFT_ORDER[bShift] ?? 9);
+        if (shiftDiff !== 0) return shiftDiff;
+        return (PDF_ROLE_ORDER[aRole] ?? 9) - (PDF_ROLE_ORDER[bRole] ?? 9);
+      });
+
+      for (const key of sortedKeys) {
+        const emps = shiftRoleMap.get(key)!;
+        const [shift, role] = key.split('-');
+        const shiftLabel = shift === 'am' ? 'AM' : shift === 'pm' ? 'PM' : shift.charAt(0).toUpperCase() + shift.slice(1);
+        const roleLabel = PDF_ROLE_LABEL[role] ?? role.toUpperCase();
+
+        // Sort within group: custom drag order → alphabetical
         emps.sort((a, b) => {
-          const roleDiff = (PDF_ROLE_ORDER[a.role] ?? 9) - (PDF_ROLE_ORDER[b.role] ?? 9);
-          if (roleDiff !== 0) return roleDiff;
           const groupKey = `${a.default_shift}-${a.role}`;
           const order = customOrder[groupKey];
           if (order) {
@@ -282,7 +297,8 @@ export default function MonthGrid() {
           }
           return a.name.localeCompare(b.name);
         });
-        shiftGroups.push({ key, label, emps });
+
+        shiftGroups.push({ key, label: `${shiftLabel} — ${roleLabel}`, emps });
       }
 
       // Legend renderer (used on each page)
@@ -406,7 +422,7 @@ export default function MonthGrid() {
         pdf.setFontSize(18);
         pdf.setTextColor(30, 30, 30);
         pdf.setFont('helvetica', 'bold');
-        pdf.text(`${format(currentDate, 'MMMM yyyy')} — ${group.label} Shift`, 30, 28);
+        pdf.text(`${format(currentDate, 'MMMM yyyy')} — ${group.label}`, 30, 28);
 
         drawLegend();
 
@@ -415,18 +431,8 @@ export default function MonthGrid() {
         const body: string[][] = [];
         const guestRowIndices = new Set<number>();
 
-        const roleHeaderRows = new Set<number>(); // track which body rows are role headers
-        const PDF_ROLE_LABELS: Record<string, string> = { admin: 'ADMIN', cls: 'CLS', mlt: 'MLT' };
+        const roleHeaderRows = new Set<number>(); // unused now but kept for didParseCell/didDrawCell compat
         group.emps.forEach((emp, empIdx) => {
-          // Insert role header row when role changes
-          const prevEmpRole = empIdx > 0 ? group.emps[empIdx - 1].role : null;
-          if (empIdx === 0 || emp.role !== prevEmpRole) {
-            roleHeaderRows.add(body.length);
-            const headerCells = [PDF_ROLE_LABELS[emp.role] ?? emp.role.toUpperCase()];
-            for (let ci = 0; ci < days.length; ci++) headerCells.push('');
-            body.push(headerCells);
-          }
-
           const ri = body.length;
           const cells = [emp.name];
           for (let ci = 0; ci < days.length; ci++) {
@@ -515,8 +521,8 @@ export default function MonthGrid() {
         const dayColWidth = (usableWidth - empColWidth) / days.length;
 
         // Scale font based on available column width and employee count
-        const fontSize = group.emps.length <= 5 ? 9 : group.emps.length <= 10 ? 8 : 7;
-        const cellHeight = group.emps.length <= 5 ? 28 : group.emps.length <= 10 ? 22 : 18;
+        const fontSize = group.emps.length <= 8 ? 9 : group.emps.length <= 14 ? 8 : 7;
+        const cellHeight = group.emps.length <= 8 ? 28 : group.emps.length <= 14 ? 22 : 18;
 
         // Build column styles — explicitly set width for every column
         const colStyles: Record<number, { halign?: string; cellWidth?: number; fontSize?: number; fontStyle?: string; overflow?: string }> = {
